@@ -4,7 +4,7 @@ use crate::bg;
 use crate::config::Config;
 use crate::render::{Frame, Renderer};
 use crate::weather::{self, Weather};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
 use std::time::Instant;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
@@ -63,19 +63,34 @@ struct State {
 }
 
 const ID_TIMER: usize = 1;
-const PREVIEW_X: i32 = 486;
-const PREVIEW_Y: i32 = 14;
-const PREVIEW_W: i32 = 400;
-const PREVIEW_H: i32 = 225;
+/// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
+/// the preview takes whatever room is left, keeping 16:9.
+const PANEL_W: i32 = 470;
+const CONTENT_H: i32 = 424;
+const BUTTON_ROW_H: i32 = 46;
+const MIN_PREVIEW_W: i32 = 240;
+const MARGIN: i32 = 14;
+const ID_CAPTION: i32 = 119;
 
-thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; }
+thread_local! {
+    static ST: RefCell<Option<State>> = const { RefCell::new(None) };
+    static PANEL: Cell<isize> = const { Cell::new(0) };
+    static PREV: Cell<isize> = const { Cell::new(0) };
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Controls live in the scrolling panel; the footer buttons live directly on the dialog.
 unsafe fn item(dlg: HWND, id: i32) -> HWND {
-    GetDlgItem(dlg, id)
+    let panel = PANEL.with(|c| c.get()) as HWND;
+    let h = if panel.is_null() { null_mut() } else { GetDlgItem(panel, id) };
+    if h.is_null() {
+        GetDlgItem(dlg, id)
+    } else {
+        h
+    }
 }
 
 unsafe fn get_text(h: HWND) -> String {
@@ -97,7 +112,8 @@ unsafe fn sel(dlg: HWND, id: i32) -> usize {
     SendMessageW(item(dlg, id), CB_GETCURSEL_, 0, 0).max(0) as usize
 }
 
-unsafe fn build(dlg: HWND) {
+/// Options controls, parented to the scrolling panel.
+unsafe fn build(panel: HWND) {
     let (cfg, dpi, font) = ST.with(|s| {
         let s = s.borrow();
         let s = s.as_ref().unwrap();
@@ -106,7 +122,7 @@ unsafe fn build(dlg: HWND) {
     let sc = |v: i32| v * dpi / 96;
     let hinst = GetModuleHandleW(null());
     let mk = |class: &str, text: &str, style: u32, ex: u32, x: i32, y: i32, w: i32, h: i32, id: i32| -> HWND {
-        let hw = CreateWindowExW(ex, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, sc(x), sc(y), sc(w), sc(h), dlg, id as isize as HMENU, hinst, null());
+        let hw = CreateWindowExW(ex, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, sc(x), sc(y), sc(w), sc(h), panel, id as isize as HMENU, hinst, null());
         SendMessageW(hw, WM_SETFONT, font as usize, 1);
         hw
     };
@@ -183,12 +199,126 @@ unsafe fn build(dlg: HWND) {
     label("Font", y);
     let fh = combo(ID_FONT, &FONT_OPTS, 0, y, CBS_DROPDOWN as u32);
     set_text(fh, if cfg.font.is_empty() { FONT_OPTS[0] } else { &cfg.font });
-    y += 40;
+}
 
-    mk("STATIC", "Live preview \u{2014} changes show instantly", 0, 0, PREVIEW_X, PREVIEW_Y + PREVIEW_H + 8, PREVIEW_W, 18, 0);
-    mk("BUTTON", "Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, lx, y, 130, 26, ID_PREVIEW);
-    mk("BUTTON", "OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, 0, cx + 50, y, 110, 26, IDOK);
-    mk("BUTTON", "Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, cx + 170, y, 110, 26, IDCANCEL);
+/// Caption under the preview and the OK/Cancel row; `layout` positions them.
+unsafe fn build_footer(dlg: HWND) {
+    let font = ST.with(|s| s.borrow().as_ref().unwrap().font);
+    let hinst = GetModuleHandleW(null());
+    let mk = |text: &str, style: u32, id: i32| {
+        let hw = CreateWindowExW(0, wide(if style == 0 { "STATIC" } else { "BUTTON" }).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, dlg, id as isize as HMENU, hinst, null());
+        SendMessageW(hw, WM_SETFONT, font as usize, 1);
+    };
+    mk("Live preview \u{2014} changes show instantly", 0, ID_CAPTION);
+    mk("Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_PREVIEW);
+    mk("OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, IDOK);
+    mk("Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, IDCANCEL);
+}
+
+/// Position panel, preview and footer for the current client size; resize the preview renderer to match.
+unsafe fn layout(dlg: HWND) {
+    let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
+    let sc = |v: i32| v * dpi / 96;
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(dlg, &mut rc);
+    let (cw, ch) = (rc.right, rc.bottom);
+    let btn_h = sc(BUTTON_ROW_H);
+    let panel = PANEL.with(|c| c.get()) as HWND;
+    let prev = PREV.with(|c| c.get()) as HWND;
+    if panel.is_null() || cw <= 0 || ch <= 0 {
+        return;
+    }
+    // options panel (left): fixed width, scrolls vertically when the window is shorter than its content
+    let panel_h = (ch - btn_h).max(sc(60));
+    MoveWindow(panel, 0, 0, sc(PANEL_W), panel_h, 1);
+    let mut si: SCROLLINFO = std::mem::zeroed();
+    si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+    si.fMask = SIF_POS;
+    GetScrollInfo(panel, SB_VERT, &mut si);
+    let old_pos = si.nPos;
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    si.nMin = 0;
+    si.nMax = sc(CONTENT_H) - 1;
+    si.nPage = panel_h as u32;
+    SetScrollInfo(panel, SB_VERT, &si, 1);
+    si.fMask = SIF_POS;
+    GetScrollInfo(panel, SB_VERT, &mut si);
+    if si.nPos != old_pos {
+        ScrollWindowEx(panel, 0, old_pos - si.nPos, null(), null(), null_mut(), null_mut(), SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    }
+    // preview (right): 16:9, as large as fits
+    let rx = sc(PANEL_W + 8);
+    let (top, caption_h) = (sc(MARGIN), sc(26));
+    let avail_w = (cw - rx - sc(MARGIN)).max(sc(MIN_PREVIEW_W));
+    let avail_h = (ch - btn_h - top - caption_h).max(sc(60));
+    let (mut pw, mut ph) = (avail_w, avail_w * 9 / 16);
+    if ph > avail_h {
+        ph = avail_h;
+        pw = ph * 16 / 9;
+    }
+    if !prev.is_null() {
+        MoveWindow(prev, rx, top, pw, ph, 1);
+        let mut pc: RECT = std::mem::zeroed();
+        GetClientRect(prev, &mut pc);
+        ST.with(|s| {
+            if let Some(r) = s.borrow_mut().as_mut().and_then(|s| s.preview.as_mut()) {
+                r.w = pc.right.max(1);
+                r.h = pc.bottom.max(1);
+            }
+        });
+    }
+    MoveWindow(GetDlgItem(dlg, ID_CAPTION), rx, top + ph + sc(6), pw.max(sc(120)), sc(18), 1);
+    // footer buttons
+    let by = ch - btn_h + sc(10);
+    MoveWindow(GetDlgItem(dlg, ID_PREVIEW), sc(MARGIN), by, sc(150), sc(26), 1);
+    let cancel_x = cw - sc(MARGIN) - sc(110);
+    MoveWindow(GetDlgItem(dlg, IDCANCEL), cancel_x, by, sc(110), sc(26), 1);
+    MoveWindow(GetDlgItem(dlg, IDOK), cancel_x - sc(10) - sc(110), by, sc(110), sc(26), 1);
+}
+
+unsafe fn scroll_panel(panel: HWND, f: impl Fn(&SCROLLINFO) -> i32) {
+    let mut si: SCROLLINFO = std::mem::zeroed();
+    si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+    si.fMask = SIF_ALL;
+    GetScrollInfo(panel, SB_VERT, &mut si);
+    let max = (si.nMax - si.nPage as i32 + 1).max(0);
+    let new = f(&si).clamp(0, max);
+    if new != si.nPos {
+        ScrollWindowEx(panel, 0, si.nPos - new, null(), null(), null_mut(), null_mut(), SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+        si.fMask = SIF_POS;
+        si.nPos = new;
+        SetScrollInfo(panel, SB_VERT, &si, 1);
+    }
+}
+
+/// The options panel: forwards control notifications to the dialog and scrolls (bar, wheel).
+unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
+    match msg {
+        WM_COMMAND | WM_HSCROLL_ => return SendMessageW(GetParent(hwnd), msg, wp, lp),
+        WM_VSCROLL => {
+            let line = 24 * dpi / 96;
+            let code = (wp & 0xFFFF) as i32;
+            scroll_panel(hwnd, |si| match code {
+                SB_LINEUP => si.nPos - line,
+                SB_LINEDOWN => si.nPos + line,
+                SB_PAGEUP => si.nPos - si.nPage as i32,
+                SB_PAGEDOWN => si.nPos + si.nPage as i32,
+                SB_THUMBTRACK | SB_THUMBPOSITION => si.nTrackPos,
+                SB_TOP => 0,
+                SB_BOTTOM => i32::MAX,
+                _ => si.nPos,
+            });
+            return 0;
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wp >> 16) & 0xFFFF) as u16 as i16 as i32;
+            scroll_panel(hwnd, |si| si.nPos - delta * (48 * dpi / 96) / 120);
+            return 0;
+        }
+        _ => {}
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
 }
 
 /// Pull every control back into a Config. Returns None (after telling the user) if the location can't be resolved.
@@ -245,8 +375,29 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
 unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
-            build(hwnd);
+            let hinst = GetModuleHandleW(null());
+            let dpi = ST.with(|s| s.borrow().as_ref().unwrap().dpi);
+            let panel = CreateWindowExW(WS_EX_CONTROLPARENT, wide("WxScrPanel").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN, 0, 0, PANEL_W * dpi / 96, CONTENT_H * dpi / 96, hwnd, null_mut(), hinst, null());
+            PANEL.with(|c| c.set(panel as isize));
+            build(panel);
+            build_footer(hwnd);
             make_preview(hwnd);
+            layout(hwnd);
+            return 0;
+        }
+        WM_SIZE => {
+            if wp != SIZE_MINIMIZED as usize {
+                layout(hwnd);
+            }
+            return 0;
+        }
+        WM_GETMINMAXINFO => {
+            let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
+            let mut r = RECT { left: 0, top: 0, right: (PANEL_W + 8 + MIN_PREVIEW_W + MARGIN) * dpi / 96, bottom: (BUTTON_ROW_H + 300) * dpi / 96 };
+            AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, 0, 0);
+            let mmi = &mut *(lp as *mut MINMAXINFO);
+            mmi.ptMinTrackSize.x = r.right - r.left;
+            mmi.ptMinTrackSize.y = r.bottom - r.top;
             return 0;
         }
         WM_TIMER if wp == ID_TIMER => {
@@ -328,12 +479,12 @@ unsafe fn make_preview(dlg: HWND) {
     wc.hbrBackground = GetStockObject(BLACK_BRUSH) as _;
     wc.style = CS_OWNDC;
     RegisterClassW(&wc);
-    let dpi = ST.with(|s| s.borrow().as_ref().unwrap().dpi);
-    let sc = |v: i32| v * dpi / 96;
-    let hw = CreateWindowExW(WS_EX_CLIENTEDGE, class.as_ptr(), null(), WS_CHILD | WS_VISIBLE, sc(PREVIEW_X), sc(PREVIEW_Y), sc(PREVIEW_W), sc(PREVIEW_H), dlg, null_mut(), hinst, null());
+    // initial size is irrelevant: `layout` resizes the window and the renderer right after
+    let hw = CreateWindowExW(WS_EX_CLIENTEDGE, class.as_ptr(), null(), WS_CHILD | WS_VISIBLE, 0, 0, 320, 180, dlg, null_mut(), hinst, null());
     if hw.is_null() {
         return;
     }
+    PREV.with(|c| c.set(hw as isize));
     let mut rc: RECT = std::mem::zeroed();
     GetClientRect(hw, &mut rc);
     let cfg = ST.with(|s| s.borrow().as_ref().unwrap().cfg.clone());
@@ -384,17 +535,34 @@ pub unsafe fn run(owner: HWND) {
     wc.lpszClassName = class.as_ptr();
     wc.hbrBackground = (COLOR_BTNFACE + 1) as isize as HBRUSH;
     wc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
+    // the icon is embedded as resource #1 (see wxscr.rc); harmless if it's missing
+    wc.hIcon = LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR) as _;
     RegisterClassW(&wc);
 
+    let mut pc: WNDCLASSW = std::mem::zeroed();
+    pc.lpfnWndProc = Some(panel_proc);
+    pc.hInstance = hinst;
+    pc.hbrBackground = (COLOR_BTNFACE + 1) as isize as HBRUSH;
+    pc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
+    let panel_class = wide("WxScrPanel");
+    pc.lpszClassName = panel_class.as_ptr();
+    RegisterClassW(&pc);
+
     let sc = |v: i32| v * dpi / 96;
-    let style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    let mut r = RECT { left: 0, top: 0, right: sc(PREVIEW_X + PREVIEW_W + 14), bottom: sc(572) };
+    let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+    // comfortable default: options panel + a 400px-wide preview, but never bigger than ~92% of the screen
+    let (scr_w, scr_h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    let mut r = RECT { left: 0, top: 0, right: sc(PANEL_W + 8 + 400 + MARGIN), bottom: sc(CONTENT_H + BUTTON_ROW_H + 40) };
     AdjustWindowRectEx(&mut r, style, 0, 0);
-    let (w, h) = (r.right - r.left, r.bottom - r.top);
-    let (x, y) = ((GetSystemMetrics(SM_CXSCREEN) - w) / 2, (GetSystemMetrics(SM_CYSCREEN) - h) / 2);
+    let (w, h) = ((r.right - r.left).min(scr_w * 92 / 100), (r.bottom - r.top).min(scr_h * 92 / 100));
+    let (x, y) = ((scr_w - w) / 2, (scr_h - h) / 2);
     let hwnd = CreateWindowExW(0, class.as_ptr(), wide("Weather Clock Screensaver Settings").as_ptr(), style | WS_VISIBLE, x, y, w, h, owner, null_mut(), hinst, null());
     if hwnd.is_null() {
         return;
+    }
+    let small = LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if !small.is_null() {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
     }
     let mut msg: MSG = std::mem::zeroed();
     while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
