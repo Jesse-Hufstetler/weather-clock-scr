@@ -149,6 +149,12 @@ impl Renderer {
         Ok(r)
     }
 
+    /// Swap the text font (settings preview); cached glyph runs are rebuilt on the next frame.
+    pub fn set_font(&mut self, face: &str) {
+        self.rast = Rasterizer::new(face);
+        self.keys = Default::default();
+    }
+
     unsafe fn ensure_fbo(&mut self, tw: i32, th: i32, quality: usize) {
         let (fw, fh) = (((tw as f32 * QUALITY_SCALE[quality]) as i32).max(16), ((th as f32 * QUALITY_SCALE[quality]) as i32).max(16));
         if self.fbo != 0 && fw == self.fw && fh == self.fh && quality == self.scale_idx {

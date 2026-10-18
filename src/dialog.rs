@@ -2,9 +2,12 @@
 
 use crate::bg;
 use crate::config::Config;
-use crate::weather;
+use crate::render::{Frame, Renderer};
+use crate::weather::{self, Weather};
 use std::cell::RefCell;
 use std::ptr::{null, null_mut};
+use std::time::Instant;
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -52,7 +55,18 @@ struct State {
     resolved: Option<(f64, f64, String, String)>, // lat, lon, name, text it was resolved for
     dpi: i32,
     font: HFONT,
+    /// Live preview: same renderer as the screensaver, driven by the dialog's current control values.
+    preview: Option<Renderer>,
+    wx: Weather,
+    last_font: String,
+    started: Instant,
 }
+
+const ID_TIMER: usize = 1;
+const PREVIEW_X: i32 = 486;
+const PREVIEW_Y: i32 = 14;
+const PREVIEW_W: i32 = 400;
+const PREVIEW_H: i32 = 225;
 
 thread_local! { static ST: RefCell<Option<State>> = const { RefCell::new(None) }; }
 
@@ -171,7 +185,8 @@ unsafe fn build(dlg: HWND) {
     set_text(fh, if cfg.font.is_empty() { FONT_OPTS[0] } else { &cfg.font });
     y += 40;
 
-    mk("BUTTON", "Preview", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, lx, y, 80, 26, ID_PREVIEW);
+    mk("STATIC", "Live preview \u{2014} changes show instantly", 0, 0, PREVIEW_X, PREVIEW_Y + PREVIEW_H + 8, PREVIEW_W, 18, 0);
+    mk("BUTTON", "Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, lx, y, 130, 26, ID_PREVIEW);
     mk("BUTTON", "OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, 0, cx + 50, y, 110, 26, IDOK);
     mk("BUTTON", "Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, cx + 170, y, 110, 26, IDCANCEL);
 }
@@ -231,6 +246,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     match msg {
         WM_CREATE => {
             build(hwnd);
+            make_preview(hwnd);
+            return 0;
+        }
+        WM_TIMER if wp == ID_TIMER => {
+            tick(hwnd);
             return 0;
         }
         WM_HSCROLL_ => {
@@ -281,6 +301,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return 0;
         }
         WM_DESTROY => {
+            KillTimer(hwnd, ID_TIMER);
             PostQuitMessage(0);
             return 0;
         }
@@ -289,12 +310,71 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     DefWindowProcW(hwnd, msg, wp, lp)
 }
 
+unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_ERASEBKGND {
+        return 1;
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+/// Child window + renderer for the live preview, and the timer that redraws it.
+unsafe fn make_preview(dlg: HWND) {
+    let hinst = GetModuleHandleW(null());
+    let class = wide("WxScrPreview");
+    let mut wc: WNDCLASSW = std::mem::zeroed();
+    wc.lpfnWndProc = Some(preview_proc);
+    wc.hInstance = hinst;
+    wc.lpszClassName = class.as_ptr();
+    wc.hbrBackground = GetStockObject(BLACK_BRUSH) as _;
+    wc.style = CS_OWNDC;
+    RegisterClassW(&wc);
+    let dpi = ST.with(|s| s.borrow().as_ref().unwrap().dpi);
+    let sc = |v: i32| v * dpi / 96;
+    let hw = CreateWindowExW(WS_EX_CLIENTEDGE, class.as_ptr(), null(), WS_CHILD | WS_VISIBLE, sc(PREVIEW_X), sc(PREVIEW_Y), sc(PREVIEW_W), sc(PREVIEW_H), dlg, null_mut(), hinst, null());
+    if hw.is_null() {
+        return;
+    }
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(hw, &mut rc);
+    let cfg = ST.with(|s| s.borrow().as_ref().unwrap().cfg.clone());
+    if let Ok(r) = Renderer::new(hw, rc.right.max(1), rc.bottom.max(1), &cfg, 0) {
+        ST.with(|s| {
+            let mut s = s.borrow_mut();
+            let s = s.as_mut().unwrap();
+            s.preview = Some(r);
+            s.last_font = cfg.font.clone();
+        });
+        SetTimer(dlg, ID_TIMER, 33, None);
+    }
+}
+
+/// Redraw the preview from whatever the controls say right now (no apply/OK needed).
+unsafe fn tick(dlg: HWND) {
+    let Some(cfg) = collect(dlg, false) else { return };
+    let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
+    GetLocalTime(&mut st);
+    ST.with(|s| {
+        let mut s = s.borrow_mut();
+        let s = s.as_mut().unwrap();
+        let t = s.started.elapsed().as_secs_f64() + 100.0;
+        let Some(r) = s.preview.as_mut() else { return };
+        if cfg.font != s.last_font {
+            r.set_font(&cfg.font);
+            s.last_font = cfg.font.clone();
+        }
+        // "random" cycles through the backgrounds so you can see them all
+        let bg = if cfg.background >= bg::NAMES.len() { (t as usize / 8) % bg::NAMES.len() } else { cfg.background };
+        let f = Frame { t, cfg: &cfg, wx: Some(&s.wx), show_text: true, bg, now: st };
+        r.render(&f, None);
+    });
+}
+
 pub unsafe fn run(owner: HWND) {
     let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem() as i32;
     let font = CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr());
-    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font }));
+    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now() }));
 
     let hinst = GetModuleHandleW(null());
     let class = wide("WxScrConfig");
@@ -308,7 +388,7 @@ pub unsafe fn run(owner: HWND) {
 
     let sc = |v: i32| v * dpi / 96;
     let style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    let mut r = RECT { left: 0, top: 0, right: sc(470), bottom: sc(572) };
+    let mut r = RECT { left: 0, top: 0, right: sc(PREVIEW_X + PREVIEW_W + 14), bottom: sc(572) };
     AdjustWindowRectEx(&mut r, style, 0, 0);
     let (w, h) = (r.right - r.left, r.bottom - r.top);
     let (x, y) = ((GetSystemMetrics(SM_CXSCREEN) - w) / 2, (GetSystemMetrics(SM_CYSCREEN) - h) / 2);

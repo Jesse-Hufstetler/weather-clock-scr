@@ -402,3 +402,29 @@ pub fn load_cache() -> Option<Weather> {
     };
     (now_unix() - w.fetched < 3 * 3600).then_some(w)
 }
+
+/// Placeholder numbers for the settings preview / snapshots when nothing has been fetched yet.
+pub fn sample() -> Weather {
+    let now = now_unix();
+    let local_offset = unsafe {
+        use windows_sys::Win32::System::Time::GetTimeZoneInformation;
+        let mut tz = std::mem::zeroed();
+        let id = GetTimeZoneInformation(&mut tz);
+        -((tz.Bias + if id == 2 { tz.DaylightBias } else { 0 }) as i64) * 60
+    };
+    Weather {
+        place: "Sample".into(),
+        temp: 62.0,
+        feels: 60.0,
+        dew: 33.0,
+        wind: Some(8.0),
+        pop: Some(20.0),
+        hi: Some(63.0),
+        lo: Some(41.0),
+        sunrise: vec![now + 40000],
+        sunset: vec![now + 9000],
+        utc_offset: local_offset,
+        fetched: now,
+        sources: 0,
+    }
+}

@@ -38,8 +38,11 @@ fn wide(s: &str) -> Vec<u16> {
 impl Rasterizer {
     pub fn new(face: &str) -> Rasterizer {
         unsafe {
-            let mut n = 0u32;
-            AddFontMemResourceEx(FONT_BYTES.as_ptr() as *const _, FONT_BYTES.len() as u32, std::ptr::null(), &mut n);
+            static REGISTER: std::sync::Once = std::sync::Once::new();
+            REGISTER.call_once(|| {
+                let mut n = 0u32;
+                AddFontMemResourceEx(FONT_BYTES.as_ptr() as *const _, FONT_BYTES.len() as u32, std::ptr::null(), &mut n);
+            });
             let face = if face.is_empty() { BUNDLED_FACE } else { face };
             Rasterizer { dc: CreateCompatibleDC(std::ptr::null_mut()), face: face.to_string(), fonts: HashMap::new() }
         }
