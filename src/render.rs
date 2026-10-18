@@ -115,7 +115,7 @@ impl Renderer {
         let text_prog = gl::program(&g, TEXT_FS)?;
         let bg_prog = gl::program(&g, &bg::source(bg_idx))?;
         let loc = Locs {
-            bg_res: gl::uloc(&g, bg_prog, "iResolution"),
+            bg_res: gl::uloc(&g, bg_prog, "wx_res"),
             bg_time: gl::uloc(&g, bg_prog, "iTime"),
             blit_src: gl::uloc(&g, blit_prog, "src"),
             blit_bright: gl::uloc(&g, blit_prog, "bright"),
@@ -236,7 +236,7 @@ impl Renderer {
         self.ensure_fbo(tw, th, f.cfg.quality);
         if f.bg != self.bg {
             self.bg_prog = gl::program(&self.gl, &bg::source(f.bg)).unwrap_or(self.bg_prog);
-            self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "iResolution");
+            self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
             self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
             self.bg = f.bg;
         }
@@ -246,7 +246,7 @@ impl Renderer {
         glViewport(0, 0, self.fw, self.fh);
         (self.gl.UseProgram)(self.bg_prog);
         (self.gl.Uniform2f)(self.loc.bg_res, self.fw as f32, self.fh as f32);
-        (self.gl.Uniform1f)(self.loc.bg_time, f.t as f32);
+        (self.gl.Uniform1f)(self.loc.bg_time, (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)]);
         Self::quad(-1.0, -1.0, 1.0, 1.0, false);
         // 2. blit to target
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, target.map_or(0, |t| t.0));

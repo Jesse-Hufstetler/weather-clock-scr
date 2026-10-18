@@ -1,24 +1,49 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const RANDOM: usize = 5;
-
-pub const NAMES: [&str; 5] = [
+pub const NAMES: [&str; 8] = [
     "Original bubbles (dash2)",
     "Silk ribbons",
     "Aurora",
     "Starstream (Flurry-ish)",
     "Plasma bloom",
+    "Random gallery (SnoopethDuckDuck, Shadertoy)",
+    "Frozen flame cavern (mrange, Shadertoy)",
+    "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
 ];
 
-pub const HEADER: &str = "#version 120\nuniform vec2 iResolution;\nuniform float iTime;\n";
+/// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
+pub const TIME_SCALE: [f32; 8] = [1.0, 1.0, 1.0, 1.0, 1.0, 0.45, 1.0, 0.6];
+
+/// Shadertoy compatibility layer: `iResolution` is a vec3 there, and GLSL 1.20 lacks tanh()/round().
+pub const HEADER: &str = "#version 120
+uniform vec2 wx_res;
+uniform float iTime;
+#define iResolution vec3(wx_res, 1.0)
+#define tanh wx_tanh
+#define round wx_round
+float wx_tanh(float x){ x = clamp(x, -15.0, 15.0); float e = exp(2.0*x); return (e - 1.0)/(e + 1.0); }
+vec2 wx_tanh(vec2 x){ return vec2(wx_tanh(x.x), wx_tanh(x.y)); }
+vec3 wx_tanh(vec3 x){ return vec3(wx_tanh(x.x), wx_tanh(x.y), wx_tanh(x.z)); }
+float wx_round(float x){ return floor(x + 0.5); }
+vec3 wx_round(vec3 x){ return floor(x + 0.5); }
+";
 pub const FOOTER: &str = "\nvoid main(){ vec4 c; mainImage(c, gl_FragCoord.xy); gl_FragColor = c; }\n";
 
 pub fn source(i: usize) -> String {
     format!("{HEADER}{}{FOOTER}", SHADERS[i.min(SHADERS.len() - 1)])
 }
 
-pub const SHADERS: [&str; 5] = [BUBBLES, RIBBONS, AURORA, STARSTREAM, PLASMA];
+pub const SHADERS: [&str; 8] = [
+    BUBBLES,
+    RIBBONS,
+    AURORA,
+    STARSTREAM,
+    PLASMA,
+    include_str!("shaders/random_gallery.glsl"),
+    include_str!("shaders/frozen_flame.glsl"),
+    include_str!("shaders/zippy_zaps.glsl"),
+];
 
 /// Straight port of the shader in dash2.html (dither moved to the final blit).
 const BUBBLES: &str = r#"
