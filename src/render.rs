@@ -32,6 +32,8 @@ struct Run {
     w: i32,
     h: i32,
     pad: i32,
+    /// Pre-blurred, low-resolution copy of the mask used for the drop shadow (bilinear-upscaled = smooth).
+    sh_tex: u32,
 }
 
 struct Locs {
@@ -43,7 +45,7 @@ struct Locs {
     text_tex: i32,
     text_alpha: i32,
     text_shoff: i32,
-    text_bias: i32,
+    text_sh: i32,
 }
 
 pub struct Renderer {
@@ -78,11 +80,11 @@ void main(){
 }";
 
 const TEXT_FS: &str = "#version 120
-uniform sampler2D tex; uniform float alpha; uniform vec2 shoff; uniform float bias; varying vec2 uv;
+uniform sampler2D tex; uniform sampler2D sh; uniform float alpha; uniform vec2 shoff; varying vec2 uv;
 void main(){
   float m = texture2D(tex, uv).r;
-  float s = texture2D(tex, uv - shoff, bias).r + texture2D(tex, uv + shoff, bias).r;
-  s = clamp(s * 1.5, 0.0, 1.0) * 0.92;
+  float s = texture2D(sh, uv - shoff).r + texture2D(sh, uv + shoff).r;
+  s = clamp(s * 1.25, 0.0, 1.0) * 0.9;
   float a = m + (1.0 - m) * s;
   gl_FragColor = vec4(vec3(m), a) * alpha;
 }";
@@ -121,7 +123,7 @@ impl Renderer {
             text_tex: gl::uloc(&g, text_prog, "tex"),
             text_alpha: gl::uloc(&g, text_prog, "alpha"),
             text_shoff: gl::uloc(&g, text_prog, "shoff"),
-            text_bias: gl::uloc(&g, text_prog, "bias"),
+            text_sh: gl::uloc(&g, text_prog, "sh"),
         };
         let mut r = Renderer {
             hdc,
@@ -193,16 +195,28 @@ impl Renderer {
         glEnd();
     }
 
-    unsafe fn upload(&mut self, slot: usize, text: &str, px: i32, pad: i32) {
+    unsafe fn upload(&mut self, slot: usize, text: &str, px: i32, pad: i32, th: i32) {
         let key = format!("{px}|{pad}|{text}");
         if self.keys[slot] == key {
             return;
         }
         let r = self.rast.raster(text, px, pad);
+        // shadow: shrink the mask, box-blur it three times (~Gaussian), keep it small and bilinear-filtered
+        let f = (th / 270).max(2);
+        let radius = ((0.0075 * th as f32) / f as f32).round().max(1.0) as usize;
+        let (sdata, sw, sh) = blur_lowres(&r.data, r.w as usize, r.h as usize, f as usize, radius);
         let run = &mut self.runs[slot];
         if run.tex == 0 {
             glGenTextures(1, &mut run.tex);
+            glGenTextures(1, &mut run.sh_tex);
         }
+        glBindTexture(GL_TEXTURE_2D, run.sh_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, gl::LUMINANCE8 as i32, sw as i32, sh as i32, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, sdata.as_ptr() as *const _);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
         glBindTexture(GL_TEXTURE_2D, run.tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, gl::LUMINANCE8 as i32, r.w, r.h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, r.data.as_ptr() as *const _);
@@ -211,7 +225,7 @@ impl Renderer {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
-        *run = Run { tex: run.tex, w: r.w, h: r.h, pad: r.pad };
+        *run = Run { tex: run.tex, w: r.w, h: r.h, pad: r.pad, sh_tex: run.sh_tex };
         self.keys[slot] = key;
     }
 
@@ -272,18 +286,18 @@ impl Renderer {
         let temp_s = |v: f64| format!("{}\u{b0}", (if cfg.fahrenheit { v } else { (v - 32.0) * 5.0 / 9.0 }).round() as i64);
         let has_wx = f.wx.is_some();
         if let Some(w) = f.wx {
-            self.upload(0, DAYS[(st.wDayOfWeek as usize) % 7], em1, pad);
-            self.upload(1, &temp_s(w.feels), em1, pad);
-            self.upload(2, &temp_s(w.dew), em1, pad);
-            self.upload(3, "feels like", emc, pad);
-            self.upload(4, "dew point", emc, pad);
+            self.upload(0, DAYS[(st.wDayOfWeek as usize) % 7], em1, pad, th);
+            self.upload(1, &temp_s(w.feels), em1, pad, th);
+            self.upload(2, &temp_s(w.dew), em1, pad, th);
+            self.upload(3, "feels like", emc, pad, th);
+            self.upload(4, "dew point", emc, pad, th);
         }
-        self.upload(5, &date, em2, pad);
-        self.upload(6, &time, em3, pad);
+        self.upload(5, &date, em2, pad, th);
+        self.upload(6, &time, em3, pad, th);
         let details = if cfg.details { f.wx.map(|w| details_line(w, cfg)).unwrap_or_default() } else { String::new() };
         let has_details = !details.is_empty();
         if has_details {
-            self.upload(7, &details, em4, pad);
+            self.upload(7, &details, em4, pad, th);
         }
 
         // layout in pixels, origin at the block's centre; y grows downward
@@ -328,13 +342,15 @@ impl Renderer {
         (self.gl.UseProgram)(self.text_prog);
         (self.gl.ActiveTexture)(gl::TEXTURE0);
         (self.gl.Uniform1i)(self.loc.text_tex, 0);
-        let bias = ((0.011 * hh).max(2.0)).log2() - 0.3;
-        (self.gl.Uniform1f)(self.loc.text_bias, bias);
+        (self.gl.Uniform1i)(self.loc.text_sh, 1);
         let sh_px = 0.009 * hh;
         for (slot, x, ly, alpha) in items {
             let run = self.runs[slot];
             let (sx, sy) = (cx + x * s - run.pad as f32 * s, cy0 + (ly - block_h / 2.0) * s - run.pad as f32 * s);
             let (qw, qh) = (run.w as f32 * s, run.h as f32 * s);
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
+            glBindTexture(GL_TEXTURE_2D, run.sh_tex);
+            (self.gl.ActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, run.tex);
             (self.gl.Uniform1f)(self.loc.text_alpha, alpha);
             (self.gl.Uniform2f)(self.loc.text_shoff, sh_px / run.w as f32, sh_px / run.h as f32);
@@ -391,4 +407,49 @@ fn details_line(w: &Weather, cfg: &Config) -> String {
         parts.push(format!("{label} {clock}"));
     }
     parts.join("   \u{b7}   ")
+}
+
+/// Box-downsample a mask by `f`, then blur it with three box passes of `radius`. Returns (data, w, h).
+fn blur_lowres(src: &[u8], w: usize, h: usize, f: usize, radius: usize) -> (Vec<u8>, usize, usize) {
+    let (sw, sh) = ((w + f - 1) / f, (h + f - 1) / f);
+    let mut a = vec![0f32; sw * sh];
+    for y in 0..h {
+        for x in 0..w {
+            a[(y / f) * sw + x / f] += src[y * w + x] as f32;
+        }
+    }
+    let norm = 1.0 / (f * f) as f32 / 255.0;
+    a.iter_mut().for_each(|v| *v *= norm);
+    let mut b = vec![0f32; sw * sh];
+    let win = (2 * radius + 1) as f32;
+    for _ in 0..3 {
+        // horizontal (edges read as 0, so the shadow fades out inside the padding)
+        for y in 0..sh {
+            let row = &a[y * sw..(y + 1) * sw];
+            let mut sum: f32 = row.iter().take(radius + 1).sum();
+            for x in 0..sw {
+                b[y * sw + x] = sum / win;
+                if x + radius + 1 < sw {
+                    sum += row[x + radius + 1];
+                }
+                if x >= radius {
+                    sum -= row[x - radius];
+                }
+            }
+        }
+        // vertical
+        for x in 0..sw {
+            let mut sum: f32 = (0..=radius.min(sh - 1)).map(|y| b[y * sw + x]).sum();
+            for y in 0..sh {
+                a[y * sw + x] = sum / win;
+                if y + radius + 1 < sh {
+                    sum += b[(y + radius + 1) * sw + x];
+                }
+                if y >= radius {
+                    sum -= b[(y - radius) * sw + x];
+                }
+            }
+        }
+    }
+    (a.iter().map(|v| (v * 255.0).clamp(0.0, 255.0) as u8).collect(), sw, sh)
 }
