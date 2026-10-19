@@ -1,5 +1,5 @@
 //! One OpenGL context per window. Pipeline per frame:
-//!   1. background shader -> half-float offscreen buffer (at a reduced scale: cheap on the GPU)
+//!   1. background shader -> half-float offscreen buffer at native resolution
 //!   2. blit to the window with a touch of noise dither (kills banding) and a brightness control
 //!   3. text runs (GDI-rasterised masks) with a soft shadow, scaled/drifted for burn-in protection
 
@@ -12,7 +12,6 @@ use windows_sys::Win32::Foundation::{HWND, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::Graphics::OpenGL::*;
 
-const QUALITY_SCALE: [f32; 4] = [0.35, 0.5, 0.75, 1.0];
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
 const GL_LUMINANCE: u32 = 0x1909;
@@ -49,6 +48,8 @@ struct Locs {
 }
 
 pub struct Renderer {
+    /// True when the driver honoured a swap interval of 1 (so SwapBuffers paces frames to the display).
+    pub vsync: bool,
     hdc: HDC,
     rc: HGLRC,
     gl: Gl,
@@ -63,7 +64,6 @@ pub struct Renderer {
     fbo_tex: u32,
     fw: i32,
     fh: i32,
-    scale: f32,
     rast: Rasterizer,
     runs: [Run; 8],
     keys: [String; 8],
@@ -107,9 +107,10 @@ impl Renderer {
             return Err("could not create an OpenGL context".into());
         }
         let g = Gl::load()?;
+        let mut vsync = false;
         if let Some(p) = wglGetProcAddress(b"wglSwapIntervalEXT\0".as_ptr()) {
             let f: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(p);
-            f(1);
+            vsync = f(1) != 0;
         }
         let blit_prog = gl::program(&g, BLIT_FS)?;
         let text_prog = gl::program(&g, TEXT_FS)?;
@@ -126,6 +127,7 @@ impl Renderer {
             text_sh: gl::uloc(&g, text_prog, "sh"),
         };
         let mut r = Renderer {
+            vsync,
             hdc,
             rc,
             gl: g,
@@ -140,12 +142,11 @@ impl Renderer {
             fbo_tex: 0,
             fw: 0,
             fh: 0,
-            scale: f32::NAN,
             rast: Rasterizer::new(&cfg.font),
             runs: [Run::default(); 8],
             keys: Default::default(),
         };
-        r.ensure_fbo(w, h, QUALITY_SCALE[cfg.quality].max(bg::MIN_SCALE[bg_idx.min(bg::NAMES.len() - 1)]));
+        r.ensure_fbo(w, h);
         Ok(r)
     }
 
@@ -155,9 +156,9 @@ impl Renderer {
         self.keys = Default::default();
     }
 
-    unsafe fn ensure_fbo(&mut self, tw: i32, th: i32, scale: f32) {
-        let (fw, fh) = (((tw as f32 * scale) as i32).max(16), ((th as f32 * scale) as i32).max(16));
-        if self.fbo != 0 && fw == self.fw && fh == self.fh && scale == self.scale {
+    unsafe fn ensure_fbo(&mut self, tw: i32, th: i32) {
+        let (fw, fh) = (tw.max(16), th.max(16));
+        if self.fbo != 0 && fw == self.fw && fh == self.fh {
             return;
         }
         if self.fbo_tex != 0 {
@@ -183,7 +184,6 @@ impl Renderer {
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
         self.fw = fw;
         self.fh = fh;
-        self.scale = scale;
     }
 
     unsafe fn quad(x0: f32, y0: f32, x1: f32, y1: f32, text: bool) {
@@ -239,7 +239,7 @@ impl Renderer {
     pub unsafe fn render(&mut self, f: &Frame, target: Option<(u32, i32, i32)>) {
         wglMakeCurrent(self.hdc, self.rc);
         let (tw, th) = target.map_or((self.w, self.h), |t| (t.1, t.2));
-        self.ensure_fbo(tw, th, QUALITY_SCALE[f.cfg.quality].max(bg::MIN_SCALE[f.bg.min(bg::NAMES.len() - 1)]));
+        self.ensure_fbo(tw, th);
         if f.bg != self.bg {
             self.bg_prog = gl::program(&self.gl, &bg::source(f.bg)).unwrap_or(self.bg_prog);
             self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");

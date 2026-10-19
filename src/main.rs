@@ -238,8 +238,19 @@ unsafe fn run(mode: Mode, cfg: Config) {
 
     let start = Instant::now();
     let t_offset = (weather::now_unix() % 1000) as f64;
-    let frame_dt = Duration::from_secs_f64(1.0 / cfg.fps as f64);
+    // No cap by default: SwapBuffers with vsync paces us to the display's refresh rate. Only fall back to a
+    // 60 fps timer if the driver refused vsync (otherwise we'd spin a core flat out).
+    let all_vsync = wins.iter().filter_map(|w| w.renderer.as_ref()).all(|r| r.vsync);
+    let frame_dt = if cfg.fps > 0 {
+        Some(Duration::from_secs_f64(1.0 / cfg.fps as f64))
+    } else if all_vsync {
+        None
+    } else {
+        Some(Duration::from_secs_f64(1.0 / 60.0))
+    };
     let mut next = Instant::now();
+    let debug = std::env::var_os("WXSCR_DEBUG").is_some();
+    let (mut frames, mut last_report) = (0u32, Instant::now());
     let mut last_parent_check = Instant::now();
     loop {
         let mut msg: MSG = std::mem::zeroed();
@@ -257,7 +268,7 @@ unsafe fn run(mode: Mode, cfg: Config) {
             }
         }
         let now = Instant::now();
-        if now >= next {
+        if frame_dt.is_none() || now >= next {
             let mut st = std::mem::zeroed();
             GetLocalTime(&mut st);
             let guard = WEATHER.lock().unwrap();
@@ -268,9 +279,19 @@ unsafe fn run(mode: Mode, cfg: Config) {
                 }
             }
             drop(guard);
-            next += frame_dt;
-            if next < now {
-                next = now + frame_dt;
+            if debug {
+                frames += 1;
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    log(&format!("fps={:.1} vsync={} cap={:?}", frames as f64 / last_report.elapsed().as_secs_f64(), all_vsync, frame_dt));
+                    frames = 0;
+                    last_report = Instant::now();
+                }
+            }
+            if let Some(dt) = frame_dt {
+                next += dt;
+                if next < now {
+                    next = now + dt;
+                }
             }
         } else {
             let ms = (next - now).as_millis() as u32;

@@ -33,7 +33,6 @@ const ID_H24: i32 = 105;
 const ID_SECS: i32 = 106;
 const ID_DETAILS: i32 = 107;
 const ID_BG: i32 = 108;
-const ID_QUALITY: i32 = 109;
 const ID_FPS: i32 = 110;
 const ID_BRIGHT: i32 = 111;
 const ID_MOVE: i32 = 112;
@@ -44,9 +43,9 @@ const ID_PREVIEW: i32 = 116;
 const ID_BRIGHT_V: i32 = 117;
 const ID_MOVE_V: i32 = 118;
 
-const FPS_OPTS: [u32; 4] = [15, 20, 30, 60];
+const FPS_OPTS: [u32; 3] = [0, 60, 30];
+const FPS_NAMES: [&str; 3] = ["Match display refresh rate (smoothest)", "Cap at 60 fps", "Cap at 30 fps"];
 const REFRESH_OPTS: [u32; 4] = [10, 20, 30, 60];
-const QUALITY_OPTS: [&str; 4] = ["Lowest power (35% resolution)", "Balanced (50%)", "High (75%)", "Native (100%)"];
 const MON_OPTS: [&str; 3] = ["Clock on every monitor", "Clock on main monitor, background on others", "Clock on main monitor, others black"];
 const FONT_OPTS: [&str; 5] = ["Droid Sans Mono (bundled)", "Segoe UI", "Consolas", "Bahnschrift", "Cascadia Mono"];
 
@@ -67,7 +66,7 @@ const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 424;
+const CONTENT_H: i32 = 394;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -172,13 +171,8 @@ unsafe fn build(panel: HWND) {
     label("Background", y);
     combo(ID_BG, &names, cfg.background.min(names.len() - 1), y, CBS_DROPDOWNLIST as u32);
     y += 30;
-    label("Render quality", y);
-    combo(ID_QUALITY, &QUALITY_OPTS, cfg.quality, y, CBS_DROPDOWNLIST as u32);
-    y += 30;
     label("Frame rate", y);
-    let fps_names: Vec<String> = FPS_OPTS.iter().map(|f| format!("{f} fps{}", if *f == 30 { " (recommended)" } else { "" })).collect();
-    let fps_refs: Vec<&str> = fps_names.iter().map(|s| s.as_str()).collect();
-    combo(ID_FPS, &fps_refs, FPS_OPTS.iter().position(|f| *f == cfg.fps).unwrap_or(2), y, CBS_DROPDOWNLIST as u32);
+    combo(ID_FPS, &FPS_NAMES, FPS_OPTS.iter().position(|f| *f == cfg.fps).unwrap_or(0), y, CBS_DROPDOWNLIST as u32);
     y += 30;
     label("Brightness", y);
     let tb = |id: i32, vid: i32, lo: i32, hi: i32, val: i32, y: i32| {
@@ -369,8 +363,7 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
     cfg.seconds = checked(dlg, ID_SECS);
     cfg.details = checked(dlg, ID_DETAILS);
     cfg.background = sel(dlg, ID_BG);
-    cfg.quality = sel(dlg, ID_QUALITY);
-    cfg.fps = FPS_OPTS[sel(dlg, ID_FPS).min(3)];
+    cfg.fps = FPS_OPTS[sel(dlg, ID_FPS).min(2)];
     cfg.brightness = SendMessageW(item(dlg, ID_BRIGHT), TBM_GETPOS_, 0, 0) as u32;
     cfg.movement = SendMessageW(item(dlg, ID_MOVE), TBM_GETPOS_, 0, 0) as u32;
     cfg.monitors = sel(dlg, ID_MON);
@@ -551,7 +544,7 @@ unsafe fn make_preview(dlg: HWND) {
             s.preview = Some(r);
             s.last_font = cfg.font.clone();
         });
-        SetTimer(dlg, ID_TIMER, 33, None);
+        SetTimer(dlg, ID_TIMER, 10, None); // WM_TIMER is coarse; with vsync each render blocks to the display rate anyway
     }
 }
 

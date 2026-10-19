@@ -7,9 +7,8 @@ Chromium-web-page screensaver + `dash2.html` setup.
   Météo-France, JMA, HRRR, NBM) at "now" — the same consensus idea as `weather.html`, minus OpenWeatherMap.
 - **Clearly labelled**: big *feels like* temperature, dimmer *dew point*, each with a caption. Optional line with
   high/low, rain chance, wind and next sunrise/sunset.
-- **Backgrounds**: your original bubbles shader (ported verbatim), Silk ribbons, Aurora, Starstream (Flurry-ish), Plasma bloom, or random.
-- **Cheap on power**: backgrounds render at reduced resolution into a half-float buffer, then are upscaled with
-  dithering; 30 fps default; brightness slider for OLED; text breathes/drifts slowly against burn-in.
+- **Backgrounds**: your original bubbles shader (ported verbatim) plus three Shadertoy shaders (Random gallery, Frozen flame cavern, Zippy zaps), or random. Author, license, source, retrieval date and changes show in settings under the preview, with a full list under **Credits…**.
+- **Smooth and light**: native resolution at your display's refresh rate (paced by vsync, so it idles the CPU: a few percent of one core here). Optional fps cap and a brightness slider for OLED; the text breathes and drifts slowly against burn-in.
 - Works across multiple monitors, per-monitor DPI aware, cached weather so numbers show instantly on start.
 
 ## Install

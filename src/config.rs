@@ -18,8 +18,7 @@ pub struct Config {
     pub details: bool,
     /// Index into bg::BACKGROUNDS, or bg::RANDOM.
     pub background: usize,
-    /// 0..=3 -> background render scale (see render.rs).
-    pub quality: usize,
+    /// Frame-rate cap; 0 = no cap (render at the display's refresh rate, paced by vsync).
     pub fps: u32,
     /// 10..=100 percent.
     pub brightness: u32,
@@ -45,8 +44,7 @@ impl Default for Config {
             seconds: true,
             details: true,
             background: 0,
-            quality: 1,
-            fps: 30,
+            fps: 0,
             brightness: 100,
             movement: 60,
             monitors: 0,
@@ -84,9 +82,10 @@ impl Config {
         c.clock24 = bo("clock24", c.clock24);
         c.seconds = bo("seconds", c.seconds);
         c.details = bo("details", c.details);
-        c.background = nu("background", c.background as u64) as usize;
-        c.quality = (nu("quality", c.quality as u64) as usize).min(3);
-        c.fps = nu("fps", c.fps as u64).clamp(10, 120) as u32;
+        // stored as a stable string id ("bubbles", "zippy_zaps", "random", ...); older numeric values fall back to the default
+        c.background = v["background"].as_str().map(crate::bg::id_to_index).unwrap_or(0);
+        // new key name on purpose: older configs saved a 30 fps cap that should no longer apply
+        c.fps = match nu("fps_cap", 0) { 0 => 0, n => n.clamp(10, 240) as u32 };
         c.brightness = nu("brightness", c.brightness as u64).clamp(10, 100) as u32;
         c.movement = nu("movement", c.movement as u64).min(100) as u32;
         c.monitors = (nu("monitors", c.monitors as u64) as usize).min(2);
@@ -101,8 +100,8 @@ impl Config {
             "location": self.location, "lat": num(self.lat), "lon": num(self.lon),
             "place": self.place, "resolved_for": self.resolved_for,
             "fahrenheit": self.fahrenheit, "clock24": self.clock24, "seconds": self.seconds,
-            "details": self.details, "background": self.background, "quality": self.quality,
-            "fps": self.fps, "brightness": self.brightness, "movement": self.movement,
+            "details": self.details, "background": crate::bg::index_to_id(self.background),
+            "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
         });
         let _ = std::fs::write(path(), serde_json::to_string_pretty(&v).unwrap_or_default());
