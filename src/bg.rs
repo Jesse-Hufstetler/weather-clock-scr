@@ -1,16 +1,17 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const NAMES: [&str; 5] = [
+pub const NAMES: [&str; 6] = [
     "Original bubbles (dash2)",
     "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
     "Perhaps a screensaver (pirandello, Shadertoy)",
+    "Hex crystal (ChunderFPV, Shadertoy)",
 ];
 
 /// Stable ids stored in config.json, so adding or reordering backgrounds never changes what a saved choice means.
-pub const IDS: [&str; 5] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver"];
+pub const IDS: [&str; 6] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal"];
 const RANDOM_ID: &str = "random";
 
 /// Config id -> index into `NAMES`; "random" maps to `NAMES.len()`, unknown ids fall back to the first background.
@@ -27,7 +28,7 @@ pub fn index_to_id(i: usize) -> &'static str {
 }
 
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
-pub const TIME_SCALE: [f32; 5] = [1.0, 0.45, 1.0, 0.6, 1.0];
+pub const TIME_SCALE: [f32; 6] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0];
 
 /// Who made each background and under what terms (shown in the settings window).
 pub struct Credit {
@@ -41,7 +42,7 @@ pub struct Credit {
 
 const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
 
-pub const CREDITS: [Credit; 5] = [
+pub const CREDITS: [Credit; 6] = [
     Credit {
         author: "Jesse Hufstetler (ported from dash2.html)",
         license: "Own work",
@@ -76,6 +77,13 @@ pub const CREDITS: [Credit; 5] = [
         source: "shadertoy.com/view/Wfy3zh",
         retrieved: "2026-10-18",
         changes: "Image pass only (sound omitted); zero-initialised locals; split one dot(sin(p *= s), ..) for defined order",
+    },
+    Credit {
+        author: "ChunderFPV (hexagonal tiles by lomateron)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/ct2SWw",
+        retrieved: "2026-10-18",
+        changes: "Unmodified code (iMouse supplied as constant 0, so it auto-rotates)",
     },
 ];
 
@@ -115,6 +123,7 @@ pub const HEADER: &str = "#version 120
 uniform vec2 wx_res;
 uniform float iTime;
 #define iResolution vec3(wx_res, 1.0)
+#define iMouse vec4(0.0)
 #define tanh wx_tanh
 #define round wx_round
 float wx_tanh(float x){ x = clamp(x, -15.0, 15.0); float e = exp(2.0*x); return (e - 1.0)/(e + 1.0); }
@@ -130,12 +139,13 @@ pub fn source(i: usize) -> String {
     format!("{HEADER}{}{FOOTER}", SHADERS[i.min(SHADERS.len() - 1)])
 }
 
-pub const SHADERS: [&str; 5] = [
+pub const SHADERS: [&str; 6] = [
     BUBBLES,
     include_str!("shaders/random_gallery.glsl"),
     include_str!("shaders/frozen_flame.glsl"),
     include_str!("shaders/zippy_zaps.glsl"),
     include_str!("shaders/perhaps_a_screensaver.glsl"),
+    include_str!("shaders/hex_crystal.glsl"),
 ];
 
 /// Straight port of the shader in dash2.html (dither moved to the final blit).
