@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "wxscr"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "embed-resource",
  "serde_json",
