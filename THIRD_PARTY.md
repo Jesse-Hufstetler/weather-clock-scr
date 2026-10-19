@@ -31,4 +31,7 @@ and in full under **Credits…**.
 | NWS (api.weather.gov) | US government data, public domain |
 | MET Norway (api.met.no) | CC BY 4.0 / NLOD 2.0 — credit "Data from MET Norway" |
 | Open-Meteo (open-meteo.com) | CC BY 4.0; free for non-commercial use |
-| zippopotam.us, ipwho.is | location lookup only |
+| Windows Location Service | device location (needs Settings > Privacy > Location on) |
+| ipwho.is | IP-based location fallback |
+| BigDataCloud (api.bigdatacloud.net) | reverse geocoding: names the detected place |
+| zippopotam.us | resolves zip codes you type |

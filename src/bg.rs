@@ -94,7 +94,7 @@ pub fn about_text() -> String {
     - NWS, api.weather.gov: US government data, public domain.\r\n\
     - MET Norway, api.met.no: CC BY 4.0 / NLOD 2.0. Data from MET Norway.\r\n\
     - Open-Meteo, open-meteo.com: CC BY 4.0, free for non-commercial use. Models: NOAA GFS/HRRR/NBM, ECMWF IFS, DWD ICON, Environment Canada GEM, UK Met Office, Meteo-France, JMA.\r\n\
-    - zippopotam.us (zip codes) and ipwho.is (IP location) for finding your location.\r\n\
+    - Location: Windows Location Service first, then ipwho.is (IP address); BigDataCloud (reverse geocoding, to name the place) and zippopotam.us (zip codes you type).\r\n\
     Forecasts are averaged across sources; this is not an official forecast.\r\n\
     \r\nFONT\r\n\
     - Droid Sans Mono, Apache License 2.0 (as used on the original dash2 page).\r\n\

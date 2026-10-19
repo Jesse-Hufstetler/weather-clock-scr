@@ -35,7 +35,7 @@ Settings live in `%APPDATA%\wxscr\config.json`; the weather cache and a small `l
 
 ## Notes
 
-- Location accepts a US zip, `City, ST`, `lat,lon`, or empty for IP-based lookup (ipwho.is).
+- Location is detected automatically on every launch: the Windows Location Service first, then your IP address (ipwho.is). Uncheck **Detect automatically** in settings to type an override (a US zip, `City, ST` or `lat,lon`); the box is pre-filled with the detected place.
 - Bundled font: Droid Sans Mono (Apache-2.0), same as the original page. Any installed font name can be typed in settings.
 - MET Norway asks API users to identify themselves; edit `UA` in `src/http.rs` with your contact details.
 - Data: api.weather.gov, api.met.no, open-meteo.com (free for non-commercial use), zippopotam.us, ipwho.is.
