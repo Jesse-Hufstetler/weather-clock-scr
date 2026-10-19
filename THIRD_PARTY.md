@@ -19,8 +19,9 @@ Shadertoy keep their own licence; the NonCommercial and ShareAlike terms apply t
 | File | Author | Source | License |
 |---|---|---|---|
 | `frozen_flame.glsl` | mrange | https://www.shadertoy.com/view/N3dXRI | **CC0** (public domain), per the comment in the shader; only change: zero-initialised locals |
+| `perhaps_a_screensaver.glsl` | pirandello (fork of "Trailing the Twinkling Tunnelwisp"; original by BeRo & Paul Karlik) | https://www.shadertoy.com/view/Wfy3zh | **CC0 / public domain**, as stated in the shader. Image pass only; the shader's sound pass is not included. Retrieved 2026-10-18 |
 
-All three Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
+All four Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
 The same author / license / source / retrieved / changes details are shown in the settings window under the preview,
 and in full under **Credits…**.
 

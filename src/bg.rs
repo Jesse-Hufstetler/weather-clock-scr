@@ -1,15 +1,16 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const NAMES: [&str; 4] = [
+pub const NAMES: [&str; 5] = [
     "Original bubbles (dash2)",
     "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
+    "Perhaps a screensaver (pirandello, Shadertoy)",
 ];
 
 /// Stable ids stored in config.json, so adding or reordering backgrounds never changes what a saved choice means.
-pub const IDS: [&str; 4] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps"];
+pub const IDS: [&str; 5] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver"];
 const RANDOM_ID: &str = "random";
 
 /// Config id -> index into `NAMES`; "random" maps to `NAMES.len()`, unknown ids fall back to the first background.
@@ -26,7 +27,7 @@ pub fn index_to_id(i: usize) -> &'static str {
 }
 
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
-pub const TIME_SCALE: [f32; 4] = [1.0, 0.45, 1.0, 0.6];
+pub const TIME_SCALE: [f32; 5] = [1.0, 0.45, 1.0, 0.6, 1.0];
 
 /// Who made each background and under what terms (shown in the settings window).
 pub struct Credit {
@@ -40,7 +41,7 @@ pub struct Credit {
 
 const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
 
-pub const CREDITS: [Credit; 4] = [
+pub const CREDITS: [Credit; 5] = [
     Credit {
         author: "Jesse Hufstetler (ported from dash2.html)",
         license: "Own work",
@@ -68,6 +69,13 @@ pub const CREDITS: [Credit; 4] = [
         source: "shadertoy.com/view/XXyGzh",
         retrieved: "2026-10-18",
         changes: "Zero-initialised i, split one dot(u *= m, u) for defined order; playback 0.6x",
+    },
+    Credit {
+        author: "pirandello (fork of \"Trailing the Twinkling Tunnelwisp\"; orig. BeRo & Paul Karlik)",
+        license: "CC0 / public domain (stated in the shader)",
+        source: "shadertoy.com/view/Wfy3zh",
+        retrieved: "2026-10-18",
+        changes: "Image pass only (sound omitted); zero-initialised locals; split one dot(sin(p *= s), ..) for defined order",
     },
 ];
 
@@ -112,6 +120,7 @@ uniform float iTime;
 float wx_tanh(float x){ x = clamp(x, -15.0, 15.0); float e = exp(2.0*x); return (e - 1.0)/(e + 1.0); }
 vec2 wx_tanh(vec2 x){ return vec2(wx_tanh(x.x), wx_tanh(x.y)); }
 vec3 wx_tanh(vec3 x){ return vec3(wx_tanh(x.x), wx_tanh(x.y), wx_tanh(x.z)); }
+vec4 wx_tanh(vec4 x){ return vec4(wx_tanh(x.x), wx_tanh(x.y), wx_tanh(x.z), wx_tanh(x.w)); }
 float wx_round(float x){ return floor(x + 0.5); }
 vec3 wx_round(vec3 x){ return floor(x + 0.5); }
 ";
@@ -121,11 +130,12 @@ pub fn source(i: usize) -> String {
     format!("{HEADER}{}{FOOTER}", SHADERS[i.min(SHADERS.len() - 1)])
 }
 
-pub const SHADERS: [&str; 4] = [
+pub const SHADERS: [&str; 5] = [
     BUBBLES,
     include_str!("shaders/random_gallery.glsl"),
     include_str!("shaders/frozen_flame.glsl"),
     include_str!("shaders/zippy_zaps.glsl"),
+    include_str!("shaders/perhaps_a_screensaver.glsl"),
 ];
 
 /// Straight port of the shader in dash2.html (dither moved to the final blit).
