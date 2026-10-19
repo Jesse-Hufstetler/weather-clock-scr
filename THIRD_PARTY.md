@@ -28,8 +28,9 @@ Shadertoy keep their own licence; the NonCommercial and ShareAlike terms apply t
 | `zooming_bokeh.glsl` | FreakZillA8 (a mash-up crediting https://www.shadertoy.com/view/XcKGzG, https://www.shadertoy.com/view/wlBGDG and https://www.shadertoy.com/view/4djSRW for the hash function) | https://www.shadertoy.com/view/NfSXRt | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; unmodified. The upstream shaders it borrows from have their own authors and licenses, which I could not check. Retrieved 2026-10-18 |
 | `ultra_liquid_bokeh.glsl` | Weyland (derived from "Bubbles" by Inigo Quilez, 2013, https://www.shadertoy.com/view/4dl3zn) | https://www.shadertoy.com/view/MtdXzr | **CC BY-NC-SA 3.0 Unported**, stated in the shader header; unmodified. Retrieved 2026-10-18 |
 | `ice_and_fire.glsl` | mattz (uses a palette adapted from https://www.shadertoy.com/view/ll2GD3, hashes from https://www.shadertoy.com/view/4djSRW and barycentric code adapted from https://www.shadertoy.com/view/lslXDf, as credited in the shader) | https://www.shadertoy.com/view/MdfBzl | **CC BY-NC-SA 3.0 Unported**, stated in the shader header; unmodified. The snippets it borrows keep their own authors' licenses. Retrieved 2026-10-18 |
+| `wavy_background.glsl` | gigaherz | https://www.shadertoy.com/view/ltGSWD | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; unmodified. Retrieved 2026-10-18 |
 
-All twelve Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
+All thirteen Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
 The same author / license / source / retrieved / changes details are shown in the settings window under the preview,
 and in full under **Credits…**.
 
