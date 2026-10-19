@@ -60,6 +60,7 @@ struct State {
     wx: Weather,
     last_font: String,
     started: Instant,
+    credit_bg: usize,
 }
 
 const ID_TIMER: usize = 1;
@@ -71,6 +72,9 @@ const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
 const ID_CAPTION: i32 = 119;
+const ID_CREDIT: i32 = 120;
+const ID_ABOUT: i32 = 121;
+const CREDIT_H: i32 = 118;
 
 thread_local! {
     static ST: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -205,14 +209,16 @@ unsafe fn build(panel: HWND) {
 unsafe fn build_footer(dlg: HWND) {
     let font = ST.with(|s| s.borrow().as_ref().unwrap().font);
     let hinst = GetModuleHandleW(null());
-    let mk = |text: &str, style: u32, id: i32| {
-        let hw = CreateWindowExW(0, wide(if style == 0 { "STATIC" } else { "BUTTON" }).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, dlg, id as isize as HMENU, hinst, null());
+    let mk = |class: &str, text: &str, style: u32, id: i32| {
+        let hw = CreateWindowExW(0, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, dlg, id as isize as HMENU, hinst, null());
         SendMessageW(hw, WM_SETFONT, font as usize, 1);
     };
-    mk("Live preview \u{2014} changes show instantly", 0, ID_CAPTION);
-    mk("Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_PREVIEW);
-    mk("OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, IDOK);
-    mk("Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, IDCANCEL);
+    mk("STATIC", "Live preview \u{2014} changes show instantly", 0, ID_CAPTION);
+    mk("STATIC", "", 0x80, ID_CREDIT); // SS_NOPREFIX: '&' stays literal
+    mk("BUTTON", "Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_PREVIEW);
+    mk("BUTTON", "Credits\u{2026}", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_ABOUT);
+    mk("BUTTON", "OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, IDOK);
+    mk("BUTTON", "Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, IDCANCEL);
 }
 
 /// Position panel, preview and footer for the current client size; resize the preview renderer to match.
@@ -248,7 +254,7 @@ unsafe fn layout(dlg: HWND) {
     }
     // preview (right): 16:9, as large as fits
     let rx = sc(PANEL_W + 8);
-    let (top, caption_h) = (sc(MARGIN), sc(26));
+    let (top, caption_h) = (sc(MARGIN), sc(26) + sc(CREDIT_H));
     let avail_w = (cw - rx - sc(MARGIN)).max(sc(MIN_PREVIEW_W));
     let avail_h = (ch - btn_h - top - caption_h).max(sc(60));
     let (mut pw, mut ph) = (avail_w, avail_w * 9 / 16);
@@ -268,9 +274,11 @@ unsafe fn layout(dlg: HWND) {
         });
     }
     MoveWindow(GetDlgItem(dlg, ID_CAPTION), rx, top + ph + sc(6), pw.max(sc(120)), sc(18), 1);
+    MoveWindow(GetDlgItem(dlg, ID_CREDIT), rx, top + ph + sc(30), pw.max(sc(240)), sc(CREDIT_H) - sc(6), 1);
     // footer buttons
     let by = ch - btn_h + sc(10);
     MoveWindow(GetDlgItem(dlg, ID_PREVIEW), sc(MARGIN), by, sc(150), sc(26), 1);
+    MoveWindow(GetDlgItem(dlg, ID_ABOUT), sc(MARGIN) + sc(160), by, sc(100), sc(26), 1);
     let cancel_x = cw - sc(MARGIN) - sc(110);
     MoveWindow(GetDlgItem(dlg, IDCANCEL), cancel_x, by, sc(110), sc(26), 1);
     MoveWindow(GetDlgItem(dlg, IDOK), cancel_x - sc(10) - sc(110), by, sc(110), sc(26), 1);
@@ -426,6 +434,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         Err(e) => set_text(item(hwnd, ID_STATUS), &format!("not found: {e}")),
                     }
                 }
+                ID_ABOUT => show_credits(hwnd),
                 ID_PREVIEW => {
                     if let Some(cfg) = collect(hwnd, true) {
                         cfg.save();
@@ -459,6 +468,53 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         _ => {}
     }
     DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+unsafe extern "system" fn about_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_SIZE => {
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            MoveWindow(GetDlgItem(hwnd, 1), 0, 0, rc.right, rc.bottom, 1);
+            return 0;
+        }
+        WM_CLOSE => {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        _ => {}
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+/// Scrollable read-only window with every credit, license and data attribution.
+unsafe fn show_credits(owner: HWND) {
+    let hinst = GetModuleHandleW(null());
+    let (dpi, font) = ST.with(|s| {
+        let s = s.borrow();
+        let s = s.as_ref().unwrap();
+        (s.dpi, s.font)
+    });
+    let class = wide("WxScrAbout");
+    let mut wc: WNDCLASSW = std::mem::zeroed();
+    wc.lpfnWndProc = Some(about_proc);
+    wc.hInstance = hinst;
+    wc.lpszClassName = class.as_ptr();
+    wc.hbrBackground = (COLOR_WINDOW + 1) as isize as HBRUSH;
+    wc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
+    wc.hIcon = LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR) as _;
+    RegisterClassW(&wc); // returns 0 if already registered, which is fine
+    let sc = |v: i32| v * dpi / 96;
+    let w = CreateWindowExW(0, class.as_ptr(), wide("Credits and licenses").as_ptr(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, sc(720), sc(600), owner, null_mut(), hinst, null());
+    if w.is_null() {
+        return;
+    }
+    let edit = CreateWindowExW(0, wide("EDIT").as_ptr(), wide(&bg::about_text()).as_ptr(), WS_CHILD | WS_VISIBLE | WS_VSCROLL | (ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL) as u32, 0, 0, 10, 10, w, 1 as HMENU, hinst, null());
+    SendMessageW(edit, WM_SETFONT, font as usize, 1);
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(w, &mut rc);
+    MoveWindow(edit, 0, 0, rc.right, rc.bottom, 1);
+    SendMessageW(edit, 0x00B1 /* EM_SETSEL */, 0, 0); // no selected text on open
 }
 
 unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -517,6 +573,11 @@ unsafe fn tick(dlg: HWND) {
         let bg = if cfg.background >= bg::NAMES.len() { (t as usize / 8) % bg::NAMES.len() } else { cfg.background };
         let f = Frame { t, cfg: &cfg, wx: Some(&s.wx), show_text: true, bg, now: st };
         r.render(&f, None);
+        if s.credit_bg != bg {
+            s.credit_bg = bg;
+            let text = if cfg.background >= bg::NAMES.len() { format!("Random each time \u{2014} currently showing:\r\n{}", bg::credit_text(bg)) } else { bg::credit_text(bg) };
+            set_text(GetDlgItem(dlg, ID_CREDIT), &text);
+        }
     });
 }
 
@@ -525,7 +586,7 @@ pub unsafe fn run(owner: HWND) {
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem() as i32;
     let font = CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr());
-    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now() }));
+    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now(), credit_bg: usize::MAX }));
 
     let hinst = GetModuleHandleW(null());
     let class = wide("WxScrConfig");

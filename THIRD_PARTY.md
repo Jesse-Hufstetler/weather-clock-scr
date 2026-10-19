@@ -19,3 +19,16 @@ licence; the NonCommercial and ShareAlike terms apply to those files, not to the
 | File | Author | Source | License |
 |---|---|---|---|
 | `frozen_flame.glsl` | mrange | https://www.shadertoy.com/view/N3dXRI | **CC0** (public domain), per the comment in the shader; only change: zero-initialised locals |
+
+All three Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
+The same author / license / source / retrieved / changes details are shown in the settings window under the preview,
+and in full under **Credits…**.
+
+## Weather data (fetched at runtime, nothing bundled)
+
+| Service | Terms |
+|---|---|
+| NWS (api.weather.gov) | US government data, public domain |
+| MET Norway (api.met.no) | CC BY 4.0 / NLOD 2.0 — credit "Data from MET Norway" |
+| Open-Meteo (open-meteo.com) | CC BY 4.0; free for non-commercial use |
+| zippopotam.us, ipwho.is | location lookup only |

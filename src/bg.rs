@@ -16,6 +16,91 @@ pub const NAMES: [&str; 8] = [
 pub const TIME_SCALE: [f32; 8] = [1.0, 1.0, 1.0, 1.0, 1.0, 0.45, 1.0, 0.6];
 
 /// Shadertoy compatibility layer: `iResolution` is a vec3 there, and GLSL 1.20 lacks tanh()/round().
+/// Who made each background and under what terms (shown in the settings window).
+pub struct Credit {
+    pub author: &'static str,
+    pub license: &'static str,
+    pub source: &'static str,
+    pub retrieved: &'static str,
+    /// What was changed from the original, if anything.
+    pub changes: &'static str,
+}
+
+const OWN: Credit = Credit {
+    author: "Written for this project",
+    license: "Original to this project",
+    source: "src/bg.rs",
+    retrieved: "n/a",
+    changes: "n/a",
+};
+const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
+
+pub const CREDITS: [Credit; 8] = [
+    Credit {
+        author: "Jesse Hufstetler (ported from dash2.html)",
+        license: "Own work",
+        source: "jesse-hufstetler.github.io/dash2.html",
+        retrieved: "2026-10-18",
+        changes: "Dither moved to the final blit; otherwise a straight port",
+    },
+    OWN,
+    OWN,
+    OWN,
+    OWN,
+    Credit {
+        author: "SnoopethDuckDuck (fork of \"starting point 8008\")",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/stdSDf",
+        retrieved: "2026-10-18",
+        changes: "Unmodified code; playback slowed to 0.45x, rendered at native resolution",
+    },
+    Credit {
+        author: "mrange",
+        license: "CC0 (public domain)",
+        source: "shadertoy.com/view/N3dXRI",
+        retrieved: "2026-10-18",
+        changes: "Zero-initialised i, z and O (desktop GLSL does not)",
+    },
+    Credit {
+        author: "SnoopethDuckDuck (golf help: Nguyen2007, bug)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/XXyGzh",
+        retrieved: "2026-10-18",
+        changes: "Zero-initialised i, split one dot(u *= m, u) for defined order; playback 0.6x, native resolution",
+    },
+];
+
+/// Multi-line credit text for the settings window (\r\n for Win32 static controls).
+pub fn credit_text(i: usize) -> String {
+    let i = i.min(NAMES.len() - 1);
+    let c = &CREDITS[i];
+    format!(
+        "{}\r\nBy: {}\r\nLicense: {}\r\nSource: {}\r\nRetrieved: {}\r\nChanges: {}",
+        NAMES[i], c.author, c.license, c.source, c.retrieved, c.changes
+    )
+}
+
+/// Everything credited in one place: the app, every background, the weather data and the font.
+pub fn about_text() -> String {
+    let mut s = format!(
+        "Weather Clock Screensaver {}\r\nhttps://github.com/Jesse-Hufstetler/weather-clock-scr\r\n\r\nBACKGROUNDS\r\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for i in 0..NAMES.len() {
+        s += &format!("\r\n{}\r\n", credit_text(i).replace("\r\n", "\r\n    "));
+    }
+    s += "\r\nWEATHER DATA (no API keys)\r\n\
+    - NWS, api.weather.gov: US government data, public domain.\r\n\
+    - MET Norway, api.met.no: CC BY 4.0 / NLOD 2.0. Data from MET Norway.\r\n\
+    - Open-Meteo, open-meteo.com: CC BY 4.0, free for non-commercial use. Models: NOAA GFS/HRRR/NBM, ECMWF IFS, DWD ICON, Environment Canada GEM, UK Met Office, Meteo-France, JMA.\r\n\
+    - zippopotam.us (zip codes) and ipwho.is (IP location) for finding your location.\r\n\
+    Forecasts are averaged across sources; this is not an official forecast.\r\n\
+    \r\nFONT\r\n\
+    - Droid Sans Mono, Apache License 2.0 (as used on the original dash2 page).\r\n\
+    \r\nSee THIRD_PARTY.md in the repository for full notices.";
+    s
+}
+
 /// Minimum render scale per background. Hard-edged, high-frequency shaders turn grainy when upscaled from a
 /// reduced-resolution buffer, so they always render at native resolution.
 pub const MIN_SCALE: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0];
