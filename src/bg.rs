@@ -16,6 +16,10 @@ pub const NAMES: [&str; 8] = [
 pub const TIME_SCALE: [f32; 8] = [1.0, 1.0, 1.0, 1.0, 1.0, 0.45, 1.0, 0.6];
 
 /// Shadertoy compatibility layer: `iResolution` is a vec3 there, and GLSL 1.20 lacks tanh()/round().
+/// Minimum render scale per background. Hard-edged, high-frequency shaders turn grainy when upscaled from a
+/// reduced-resolution buffer, so they always render at native resolution.
+pub const MIN_SCALE: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 pub const HEADER: &str = "#version 120
 uniform vec2 wx_res;
 uniform float iTime;

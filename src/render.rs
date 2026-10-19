@@ -63,7 +63,7 @@ pub struct Renderer {
     fbo_tex: u32,
     fw: i32,
     fh: i32,
-    scale_idx: usize,
+    scale: f32,
     rast: Rasterizer,
     runs: [Run; 8],
     keys: [String; 8],
@@ -140,12 +140,12 @@ impl Renderer {
             fbo_tex: 0,
             fw: 0,
             fh: 0,
-            scale_idx: usize::MAX,
+            scale: f32::NAN,
             rast: Rasterizer::new(&cfg.font),
             runs: [Run::default(); 8],
             keys: Default::default(),
         };
-        r.ensure_fbo(w, h, cfg.quality);
+        r.ensure_fbo(w, h, QUALITY_SCALE[cfg.quality].max(bg::MIN_SCALE[bg_idx.min(bg::NAMES.len() - 1)]));
         Ok(r)
     }
 
@@ -155,9 +155,9 @@ impl Renderer {
         self.keys = Default::default();
     }
 
-    unsafe fn ensure_fbo(&mut self, tw: i32, th: i32, quality: usize) {
-        let (fw, fh) = (((tw as f32 * QUALITY_SCALE[quality]) as i32).max(16), ((th as f32 * QUALITY_SCALE[quality]) as i32).max(16));
-        if self.fbo != 0 && fw == self.fw && fh == self.fh && quality == self.scale_idx {
+    unsafe fn ensure_fbo(&mut self, tw: i32, th: i32, scale: f32) {
+        let (fw, fh) = (((tw as f32 * scale) as i32).max(16), ((th as f32 * scale) as i32).max(16));
+        if self.fbo != 0 && fw == self.fw && fh == self.fh && scale == self.scale {
             return;
         }
         if self.fbo_tex != 0 {
@@ -183,7 +183,7 @@ impl Renderer {
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
         self.fw = fw;
         self.fh = fh;
-        self.scale_idx = quality;
+        self.scale = scale;
     }
 
     unsafe fn quad(x0: f32, y0: f32, x1: f32, y1: f32, text: bool) {
@@ -239,7 +239,7 @@ impl Renderer {
     pub unsafe fn render(&mut self, f: &Frame, target: Option<(u32, i32, i32)>) {
         wglMakeCurrent(self.hdc, self.rc);
         let (tw, th) = target.map_or((self.w, self.h), |t| (t.1, t.2));
-        self.ensure_fbo(tw, th, f.cfg.quality);
+        self.ensure_fbo(tw, th, QUALITY_SCALE[f.cfg.quality].max(bg::MIN_SCALE[f.bg.min(bg::NAMES.len() - 1)]));
         if f.bg != self.bg {
             self.bg_prog = gl::program(&self.gl, &bg::source(f.bg)).unwrap_or(self.bg_prog);
             self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");

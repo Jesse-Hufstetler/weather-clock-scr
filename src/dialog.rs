@@ -556,10 +556,11 @@ pub unsafe fn run(owner: HWND) {
     AdjustWindowRectEx(&mut r, style, 0, 0);
     let (w, h) = ((r.right - r.left).min(scr_w * 92 / 100), (r.bottom - r.top).min(scr_h * 92 / 100));
     let (x, y) = ((scr_w - w) / 2, (scr_h - h) / 2);
-    let hwnd = CreateWindowExW(0, class.as_ptr(), wide("Weather Clock Screensaver Settings").as_ptr(), style | WS_VISIBLE, x, y, w, h, owner, null_mut(), hinst, null());
+    let hwnd = CreateWindowExW(0, class.as_ptr(), wide("Weather Clock Screensaver Settings").as_ptr(), style, x, y, w, h, owner, null_mut(), hinst, null());
     if hwnd.is_null() {
         return;
     }
+    ShowWindow(hwnd, SW_SHOWMAXIMIZED); // opens maximized: biggest preview, and plenty of room for the options
     let small = LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     if !small.is_null() {
         SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
