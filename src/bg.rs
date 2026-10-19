@@ -1,7 +1,7 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const NAMES: [&str; 11] = [
+pub const NAMES: [&str; 12] = [
     "Original bubbles (dash2)",
     "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
@@ -13,10 +13,11 @@ pub const NAMES: [&str; 11] = [
     "Screensaver squares (julianlumia, Shadertoy)",
     "Rainbeam (Inityx, Shadertoy)",
     "Zooming bokeh (FreakZillA8, Shadertoy)",
+    "Ultra liquid bokeh (Weyland after iq, Shadertoy)",
 ];
 
 /// Stable ids stored in config.json, so adding or reordering backgrounds never changes what a saved choice means.
-pub const IDS: [&str; 11] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal", "mac_flurry", "spiral_journey", "screensaver_squares", "rainbeam", "zooming_bokeh"];
+pub const IDS: [&str; 12] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal", "mac_flurry", "spiral_journey", "screensaver_squares", "rainbeam", "zooming_bokeh", "ultra_liquid_bokeh"];
 const RANDOM_ID: &str = "random";
 
 /// Config id -> index into `NAMES`; "random" maps to `NAMES.len()`, unknown ids fall back to the first background.
@@ -33,7 +34,7 @@ pub fn index_to_id(i: usize) -> &'static str {
 }
 
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
-pub const TIME_SCALE: [f32; 11] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+pub const TIME_SCALE: [f32; 12] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
 /// Who made each background and under what terms (shown in the settings window).
 pub struct Credit {
@@ -47,7 +48,7 @@ pub struct Credit {
 
 const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
 
-pub const CREDITS: [Credit; 11] = [
+pub const CREDITS: [Credit; 12] = [
     Credit {
         author: "Jesse Hufstetler (ported from dash2.html)",
         license: "Own work",
@@ -125,6 +126,13 @@ pub const CREDITS: [Credit; 11] = [
         retrieved: "2026-10-18",
         changes: "Unmodified code; upstream parts keep their own authors' licenses (not verified)",
     },
+    Credit {
+        author: "Weyland (derived from \"Bubbles\" by Inigo Quilez, 2013)",
+        license: "CC BY-NC-SA 3.0 Unported (stated in the shader)",
+        source: "shadertoy.com/view/MtdXzr (original: shadertoy.com/view/4dl3zn)",
+        retrieved: "2026-10-18",
+        changes: "Unmodified code",
+    },
 ];
 
 /// Multi-line credit text for the settings window (\r\n for Win32 static controls).
@@ -194,6 +202,7 @@ fn single(i: usize) -> Option<&'static str> {
         5 => include_str!("shaders/hex_crystal.glsl"),
         8 => include_str!("shaders/screensaver_squares.glsl"),
         10 => include_str!("shaders/zooming_bokeh.glsl"),
+        11 => include_str!("shaders/ultra_liquid_bokeh.glsl"),
         _ => return None,
     })
 }
