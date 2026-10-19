@@ -400,6 +400,7 @@ impl Renderer {
                 (self.gl.UseProgram)(prog);
                 (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), m.sw as f32, m.sh as f32);
                 (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
+                (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTimeDelta"), SIM_STEP as f32);
                 self.bind_inputs(&m, &m.spec.buffers[k].inputs, prog);
                 Self::quad(-1.0, -1.0, 1.0, 1.0, false);
                 m.read[k] = write;
@@ -416,6 +417,7 @@ impl Renderer {
         (self.gl.UseProgram)(prog);
         (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), self.fw as f32, self.fh as f32);
         (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
+        (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTimeDelta"), SIM_STEP as f32);
         self.bind_inputs(&m, &m.spec.image.inputs, prog);
         Self::quad(-1.0, -1.0, 1.0, 1.0, false);
         self.multi = Some(m);

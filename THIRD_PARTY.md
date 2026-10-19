@@ -24,8 +24,9 @@ Shadertoy keep their own licence; the NonCommercial and ShareAlike terms apply t
 | `mac_flurry/` (5 files) | ufffd (simplex noise inside by Ian McEwan / Ashima Arts, MIT) | https://www.shadertoy.com/view/lX2SDt | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Multipass: buffers A-C share `tails.glsl`; `O-=O` written `O=vec4(0.)`. Retrieved 2026-10-18 |
 | `spiral_journey/` (3 files) | ChunderFPV | https://www.shadertoy.com/view/mssSWr | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Mouse counter overlay (uses code from https://www.shadertoy.com/view/7tV3zK) omitted; the hosted background texture is replaced by generated noise. Retrieved 2026-10-18 |
 | `screensaver_squares.glsl` | julianlumia (after the starfield tutorial by BigWings / The Art of Code, https://www.youtube.com/watch?v=rvDo9LvfoVE) | https://www.shadertoy.com/view/Wdcyz7 | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; one local variable renamed. Retrieved 2026-10-18 |
+| `rainbeam/` (2 files) | Inityx | https://www.shadertoy.com/view/flffWX | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Multipass; hosted noise textures replaced by generated noise; identifiers `blobs` and `saturate` renamed. Retrieved 2026-10-18 |
 
-All eight Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
+All nine Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
 The same author / license / source / retrieved / changes details are shown in the settings window under the preview,
 and in full under **Credits…**.
 
