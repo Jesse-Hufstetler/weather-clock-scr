@@ -161,6 +161,45 @@ pub fn credit_text(i: usize) -> String {
     )
 }
 
+/// Same text as `credit_text`, as SysLink markup: every Shadertoy / website address becomes a clickable link.
+pub fn credit_markup(i: usize) -> String {
+    let text = credit_text(i);
+    let shadertoy = text.contains("shadertoy.com");
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.is_empty() {
+            return;
+        }
+        let w = word.trim_end_matches('.');
+        let tail = &word[w.len()..];
+        let url = if w.starts_with("http") {
+            Some(w.to_string())
+        } else if [".com/", ".io/", ".org/"].iter().any(|d| w.contains(d)) {
+            Some(format!("https://{w}"))
+        } else if shadertoy && w.len() > 3 && w.starts_with('/') && w[1..].chars().all(|c| c.is_ascii_alphanumeric()) {
+            Some(format!("https://www.shadertoy.com/view{w}"))
+        } else {
+            None
+        };
+        match url {
+            Some(u) => out.push_str(&format!("<a href=\"{u}\">{w}</a>{tail}")),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if matches!(c, ' ' | '\r' | '\n' | ',' | '(' | ')' | ';') {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// Everything credited in one place: the app, every background, the weather data and the font.
 pub fn about_text() -> String {
     let mut s = format!(

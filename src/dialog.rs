@@ -14,6 +14,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -79,7 +80,10 @@ const MARGIN: i32 = 14;
 const ID_CAPTION: i32 = 119;
 const ID_CREDIT: i32 = 120;
 const ID_ABOUT: i32 = 121;
-const CREDIT_H: i32 = 118;
+const CREDIT_H: i32 = 170;
+
+/// The running fullscreen-size test, if any. The preview stops rendering meanwhile so the two don't compete for the GPU.
+static TEST_RUN: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 static DETECT_RESULT: Mutex<Option<Result<weather::Detected, String>>> = Mutex::new(None);
 
@@ -222,7 +226,7 @@ unsafe fn build_footer(dlg: HWND) {
         SendMessageW(hw, WM_SETFONT, font as usize, 1);
     };
     mk("STATIC", "Live preview \u{2014} changes show instantly", 0, ID_CAPTION);
-    mk("STATIC", "", 0x80, ID_CREDIT); // SS_NOPREFIX: '&' stays literal
+    mk("SysLink", "", WS_TABSTOP, ID_CREDIT); // credit text with clickable source links
     mk("BUTTON", "Fullscreen-size test", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_PREVIEW);
     mk("BUTTON", "Credits\u{2026}", BS_PUSHBUTTON as u32 | WS_TABSTOP, ID_ABOUT);
     mk("BUTTON", "OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, IDOK);
@@ -282,7 +286,10 @@ unsafe fn layout(dlg: HWND) {
         });
     }
     MoveWindow(GetDlgItem(dlg, ID_CAPTION), rx, top + ph + sc(6), pw.max(sc(120)), sc(18), 1);
-    MoveWindow(GetDlgItem(dlg, ID_CREDIT), rx, top + ph + sc(30), pw.max(sc(240)), sc(CREDIT_H) - sc(6), 1);
+    // the credit text takes whatever is left above the footer, so long entries (several wrapped lines) aren't clipped
+    let credit_top = top + ph + sc(30);
+    let credit_h = (ch - btn_h - credit_top).max(sc(CREDIT_H) - sc(6));
+    MoveWindow(GetDlgItem(dlg, ID_CREDIT), rx, credit_top, pw.max(sc(240)), credit_h, 1);
     // footer buttons
     let by = ch - btn_h + sc(10);
     MoveWindow(GetDlgItem(dlg, ID_PREVIEW), sc(MARGIN), by, sc(150), sc(26), 1);
@@ -452,7 +459,23 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             mmi.ptMinTrackSize.y = r.bottom - r.top;
             return 0;
         }
+        WM_NOTIFY => {
+            // a click (or Enter) on a link in the credit text opens it in the default browser
+            let hdr = &*(lp as *const NMHDR);
+            if hdr.idFrom == ID_CREDIT as usize && (hdr.code == NM_CLICK || hdr.code == NM_RETURN) {
+                let link = &*(lp as *const NMLINK);
+                let url: Vec<u16> = link.item.szUrl.iter().copied().take_while(|&c| c != 0).chain(Some(0)).collect();
+                ShellExecuteW(null_mut(), wide("open").as_ptr(), url.as_ptr(), null(), null(), SW_SHOWNORMAL);
+                return 0;
+            }
+        }
         WM_TIMER if wp == ID_TIMER => {
+            let mut run = TEST_RUN.lock().unwrap();
+            if run.as_mut().map_or(false, |c| matches!(c.try_wait(), Ok(None))) {
+                return 0;
+            }
+            *run = None;
+            drop(run);
             tick(hwnd);
             return 0;
         }
@@ -484,7 +507,9 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     if let Some(cfg) = collect(hwnd, true) {
                         cfg.save();
                         if let Ok(exe) = std::env::current_exe() {
-                            let _ = std::process::Command::new(exe).arg("/w").spawn();
+                            if let Ok(child) = std::process::Command::new(exe).arg("/w").spawn() {
+                                *TEST_RUN.lock().unwrap() = Some(child);
+                            }
                         }
                     }
                 }
@@ -635,14 +660,14 @@ unsafe fn tick(dlg: HWND) {
         r.render(&f, None);
         if s.credit_bg != bg {
             s.credit_bg = bg;
-            let text = if cfg.background >= bg::NAMES.len() { format!("Random each time \u{2014} currently showing:\r\n{}", bg::credit_text(bg)) } else { bg::credit_text(bg) };
+            let text = if cfg.background >= bg::NAMES.len() { format!("Random each time \u{2014} currently showing:\r\n{}", bg::credit_markup(bg)) } else { bg::credit_markup(bg) };
             set_text(GetDlgItem(dlg, ID_CREDIT), &text);
         }
     });
 }
 
 pub unsafe fn run(owner: HWND) {
-    let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES };
+    let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES | ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem() as i32;
     let font = CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr());

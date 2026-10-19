@@ -213,20 +213,24 @@ unsafe fn run(mode: Mode, cfg: Config) {
     match &mode {
         Mode::Saver | Mode::Windowed => {
             let mut mons: Vec<Mon> = Vec::new();
+            EnumDisplayMonitors(null_mut(), null(), Some(enum_mon), &mut mons as *mut _ as LPARAM);
+            if mons.is_empty() {
+                mons.push(Mon { rect: RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) }, primary: true });
+            }
             if matches!(mode, Mode::Windowed) {
-                mons.push(Mon { rect: RECT { left: 80, top: 80, right: 80 + 1120, bottom: 80 + 630 }, primary: true });
-            } else {
-                EnumDisplayMonitors(null_mut(), null(), Some(enum_mon), &mut mons as *mut _ as LPARAM);
-                if mons.is_empty() {
-                    mons.push(Mon { rect: RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) }, primary: true });
-                }
+                // the test run covers the primary monitor at full size (quits on mouse move, key or click like the real saver), but not topmost
+                mons.retain(|m| m.primary);
             }
             for m in &mons {
                 let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
-                let (style, ex) = if matches!(mode, Mode::Windowed) { (WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0) } else { (WS_POPUP | WS_VISIBLE, WS_EX_TOPMOST) };
+                let ex = if matches!(mode, Mode::Windowed) { 0 } else { WS_EX_TOPMOST };
+                let style = WS_POPUP | WS_VISIBLE;
                 let hwnd = CreateWindowExW(ex, class.as_ptr(), title.as_ptr(), style, m.rect.left, m.rect.top, w, h, null_mut(), null_mut(), hinst, null());
                 if hwnd.is_null() {
                     continue;
+                }
+                if matches!(mode, Mode::Windowed) {
+                    SetForegroundWindow(hwnd); // so Esc reaches it
                 }
                 let black = cfg.monitors == 2 && !m.primary;
                 let show_text = !(cfg.monitors > 0 && !m.primary);
@@ -391,6 +395,7 @@ fn main() {
                 run(Mode::Saver, cfg);
             }
             "w" => {
+                SAVER.store(true, Ordering::Relaxed); // same input handling as the real saver: mouse move / key / click quits
                 let cfg = Config::load();
                 spawn_weather(cfg.clone(), true);
                 run(Mode::Windowed, cfg);

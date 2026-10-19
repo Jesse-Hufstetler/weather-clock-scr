@@ -28,7 +28,7 @@ Right-click `Weather Clock.scr` → **Install**, then pick it in Screen Saver Se
 | `/s` | run the screensaver |
 | `/c` | settings dialog |
 | `/p <hwnd>` | preview in the Windows settings thumbnail |
-| `/w` | windowed test run (Esc to quit) |
+| `/w` | full-size test run on the primary monitor (quits on mouse move or key, like the saver) |
 | `/snap <prefix> [w h [bg]]` | render backgrounds offscreen to `<prefix>-N.png` (dev) |
 
 Settings live in `%APPDATA%\wxscr\config.json`; the weather cache and a small `log.txt` are next to it.

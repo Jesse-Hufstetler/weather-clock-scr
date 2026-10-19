@@ -251,8 +251,8 @@ impl Renderer {
         glBindTexture(GL_TEXTURE_2D, run.tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, gl::LUMINANCE8 as i32, r.w, r.h, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, r.data.as_ptr() as *const _);
-        (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl::LINEAR_MIPMAP_LINEAR);
+        // no mipmaps: GenerateMipmap on this texture stalled ~300 ms on every clock tick, and the text is drawn at ~1:1 anyway
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);

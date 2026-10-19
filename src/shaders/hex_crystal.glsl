@@ -2,9 +2,10 @@
 // "Sort of a crystal nebula of hexagons." Uses simple hexagonal tiles by lomateron (https://www.shadertoy.com/view/MlXyDl).
 // License: no license stated by the author, so Shadertoy's default applies:
 // Creative Commons Attribution-NonCommercial-ShareAlike 3.0 (CC BY-NC-SA 3.0).
-// Included unmodified; the host supplies iMouse as a constant 0, so the auto-rotation branch is always taken.
+// Only change: the RT() rotation goes through wx_mat2() (driver-crash workaround, same maths). The host supplies iMouse as a constant 0, so the auto-rotation branch is always taken.
 #define H(a) (cos(radians(vec3(100, 140, 190))-((a)*6.2832))*.5+.5) // hue pallete
-#define RT(a) mat2(cos(m.a*1.571+vec4(0,-1.571,1.571,0))) // rotate
+mat2 wx_mat2(vec4 q) { return mat2(q.x, q.y, q.z, q.w); } // some GPU drivers crash on mat2(<vec4 expression>)
+#define RT(a) wx_mat2(cos(m.a*1.571+vec4(0,-1.571,1.571,0))) // rotate
 void mainImage( out vec4 C, in vec2 U )
 {
     vec3  c = vec3(0),

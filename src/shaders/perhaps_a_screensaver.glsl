@@ -8,6 +8,9 @@
 // Changes: i, z, s, d, p, q are zero-initialised (WebGL zeroes locals, desktop GLSL does not), and in g() the
 // argument-order-dependent `dot(sin(p *= s), cos(p.zxwy))` is split into two statements. tanh() comes from the host shim.
 
+// mat2(<swizzled vec4 expression>) crashes the compiler of some GPU drivers; spell the components out.
+mat2 wx_mat2(vec4 q) { return mat2(q.x, q.y, q.z, q.w); }
+
 float g(vec4 p, float s) {
     p *= s;
     return abs(dot(sin(p), cos(p.zxwy)) - 1.) / s;
@@ -27,7 +30,7 @@ void mainImage(out vec4 O, vec2 C) {
         q.y = abs(s),
         p = q,
         p.y -= .11,
-        p.xy *= mat2(cos(11. * U.zywz - 2. * p.z)),
+        p.xy *= wx_mat2(cos(11. * U.zywz - 2. * p.z)),
         p.y -= .2,
         d = abs(g(p, 8.) - g(p, 24.)) / 4.,
         //Palette Color
