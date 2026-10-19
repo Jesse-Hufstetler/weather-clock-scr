@@ -59,7 +59,7 @@ pub const CREDITS: [Credit; 8] = [
         license: "CC0 (public domain)",
         source: "shadertoy.com/view/N3dXRI",
         retrieved: "2026-10-18",
-        changes: "Zero-initialised i, z and O (desktop GLSL does not)",
+        changes: "Zero-initialised i, z and O (desktop GLSL does not); rendered at native resolution",
     },
     Credit {
         author: "SnoopethDuckDuck (golf help: Nguyen2007, bug)",
@@ -103,7 +103,7 @@ pub fn about_text() -> String {
 
 /// Minimum render scale per background. Hard-edged, high-frequency shaders turn grainy when upscaled from a
 /// reduced-resolution buffer, so they always render at native resolution.
-pub const MIN_SCALE: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0];
+pub const MIN_SCALE: [f32; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
 pub const HEADER: &str = "#version 120
 uniform vec2 wx_res;
