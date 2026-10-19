@@ -25,8 +25,9 @@ Shadertoy keep their own licence; the NonCommercial and ShareAlike terms apply t
 | `spiral_journey/` (3 files) | ChunderFPV | https://www.shadertoy.com/view/mssSWr | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Mouse counter overlay (uses code from https://www.shadertoy.com/view/7tV3zK) omitted; the hosted background texture is replaced by generated noise. Retrieved 2026-10-18 |
 | `screensaver_squares.glsl` | julianlumia (after the starfield tutorial by BigWings / The Art of Code, https://www.youtube.com/watch?v=rvDo9LvfoVE) | https://www.shadertoy.com/view/Wdcyz7 | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; one local variable renamed. Retrieved 2026-10-18 |
 | `rainbeam/` (2 files) | Inityx | https://www.shadertoy.com/view/flffWX | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Multipass; hosted noise textures replaced by generated noise; identifiers `blobs` and `saturate` renamed. Retrieved 2026-10-18 |
+| `zooming_bokeh.glsl` | FreakZillA8 (a mash-up crediting https://www.shadertoy.com/view/XcKGzG, https://www.shadertoy.com/view/wlBGDG and https://www.shadertoy.com/view/4djSRW for the hash function) | https://www.shadertoy.com/view/NfSXRt | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; unmodified. The upstream shaders it borrows from have their own authors and licenses, which I could not check. Retrieved 2026-10-18 |
 
-All nine Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
+All ten Shadertoy shaders were retrieved on **2026-10-18** (code pasted from the shader pages by the repo owner).
 The same author / license / source / retrieved / changes details are shown in the settings window under the preview,
 and in full under **Credits…**.
 
