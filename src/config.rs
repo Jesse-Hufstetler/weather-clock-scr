@@ -5,8 +5,12 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// What the user typed: zip, "city, ST", "lat,lon", or empty for "locate me by IP".
+    /// Detect the location on every launch (Windows Location Service, then IP address). When false, `location` is used.
+    pub auto_location: bool,
+    /// Typed override: zip, "city, ST" or "lat,lon". Only used when `auto_location` is off.
     pub location: String,
+    /// What auto-detection last found, as text the Location box can be pre-filled with.
+    pub detected_text: String,
     /// Resolved coordinates for `resolved_for` (cached so we don't geocode on every launch).
     pub lat: f64,
     pub lon: f64,
@@ -34,7 +38,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            location: "44720".into(),
+            auto_location: true,
+            location: String::new(),
+            detected_text: String::new(),
             lat: f64::NAN,
             lon: f64::NAN,
             place: String::new(),
@@ -73,7 +79,9 @@ impl Config {
         let st = |k: &str, d: &str| v[k].as_str().unwrap_or(d).to_string();
         let bo = |k: &str, d: bool| v[k].as_bool().unwrap_or(d);
         let nu = |k: &str, d: u64| v[k].as_u64().unwrap_or(d);
-        c.location = st("location", &c.location);
+        c.auto_location = bo("auto_location", true);
+        c.location = st("location", "");
+        c.detected_text = st("detected_text", "");
         c.lat = v["lat"].as_f64().unwrap_or(f64::NAN);
         c.lon = v["lon"].as_f64().unwrap_or(f64::NAN);
         c.place = st("place", "");
@@ -97,7 +105,7 @@ impl Config {
     pub fn save(&self) {
         let num = |x: f64| if x.is_finite() { json!(x) } else { Value::Null };
         let v = json!({
-            "location": self.location, "lat": num(self.lat), "lon": num(self.lon),
+            "auto_location": self.auto_location, "location": self.location, "detected_text": self.detected_text, "lat": num(self.lat), "lon": num(self.lon),
             "place": self.place, "resolved_for": self.resolved_for,
             "fahrenheit": self.fahrenheit, "clock24": self.clock24, "seconds": self.seconds,
             "details": self.details, "background": crate::bg::index_to_id(self.background),
@@ -108,6 +116,18 @@ impl Config {
     }
 
     pub fn located(&self) -> bool {
-        self.lat.is_finite() && self.lon.is_finite() && self.resolved_for == self.location
+        self.lat.is_finite() && self.lon.is_finite() && (self.auto_location || self.resolved_for == self.location)
+    }
+}
+
+impl Config {
+    /// Record a fresh auto-detected fix without clobbering settings the user may have just changed elsewhere.
+    pub fn store_detected(lat: f64, lon: f64, place: &str, text: &str) {
+        let mut c = Config::load();
+        c.lat = lat;
+        c.lon = lon;
+        c.place = place.to_string();
+        c.detected_text = text.to_string();
+        c.save();
     }
 }

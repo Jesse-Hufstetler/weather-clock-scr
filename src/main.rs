@@ -51,7 +51,34 @@ fn spawn_weather(mut cfg: Config, fetch_network: bool) {
         return;
     }
     std::thread::spawn(move || loop {
-        if !cfg.located() {
+        if cfg.auto_location {
+            // every cycle: Windows Location Service, then IP address — so a laptop that moves gets new weather
+            match weather::detect() {
+                Ok(d) => {
+                    cfg.lat = d.lat;
+                    cfg.lon = d.lon;
+                    cfg.place = d.name.clone();
+                    Config::store_detected(d.lat, d.lon, &d.name, &d.text);
+                }
+                Err(e) => {
+                    log(&format!("location detection failed: {e}"));
+                    if !cfg.lat.is_finite() {
+                        // never detected anything: fall back to the typed location, if any
+                        match weather::geocode(&cfg.location).ok().filter(|_| !cfg.location.is_empty()) {
+                            Some((lat, lon, name)) => {
+                                cfg.lat = lat;
+                                cfg.lon = lon;
+                                cfg.place = name;
+                            }
+                            None => {
+                                std::thread::sleep(Duration::from_secs(60));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if !cfg.located() {
             match weather::geocode(&cfg.location) {
                 Ok((lat, lon, name)) => {
                     cfg.lat = lat;
@@ -374,6 +401,10 @@ fn main() {
                     run(Mode::Preview(h), cfg);
                 }
             }
+            "detect" => match weather::detect() {
+                Ok(d) => log(&format!("detect: {} | text={:?} | ({:.4}, {:.4}) | via {}", d.name, d.text, d.lat, d.lon, d.source)),
+                Err(e) => log(&format!("detect failed: {e}")),
+            },
             "snap" => {
                 let a = |i: usize, d: i32| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
                 let only = args.get(4).and_then(|s| s.parse().ok());

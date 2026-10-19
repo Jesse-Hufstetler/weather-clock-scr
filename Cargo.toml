@@ -6,6 +6,7 @@ description = "Weather-consensus clock screensaver (.scr) with OpenGL background
 
 [dependencies]
 serde_json = "1"
+windows = { version = "0.62.2", features = ["Devices_Geolocation", "Foundation", "Win32_System_WinRT"] }
 
 [dependencies.windows-sys]
 version = "0.61"

@@ -6,6 +6,7 @@ use crate::render::{Frame, Renderer};
 use crate::weather::{self, Weather};
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
+use std::sync::Mutex;
 use std::time::Instant;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::Foundation::*;
@@ -13,6 +14,7 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CB_ADDSTRING_: u32 = 0x0143;
@@ -42,6 +44,9 @@ const ID_FONT: i32 = 115;
 const ID_PREVIEW: i32 = 116;
 const ID_BRIGHT_V: i32 = 117;
 const ID_MOVE_V: i32 = 118;
+const ID_AUTO: i32 = 122;
+/// Posted by the detection thread when `DETECT_RESULT` is ready.
+const WM_DETECTED: u32 = WM_APP + 1;
 
 const FPS_OPTS: [u32; 3] = [0, 60, 30];
 const FPS_NAMES: [&str; 3] = ["Match display refresh rate (smoothest)", "Cap at 60 fps", "Cap at 30 fps"];
@@ -60,13 +65,14 @@ struct State {
     last_font: String,
     started: Instant,
     credit_bg: usize,
+    detected: Option<weather::Detected>,
 }
 
 const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 394;
+const CONTENT_H: i32 = 418;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -74,6 +80,8 @@ const ID_CAPTION: i32 = 119;
 const ID_CREDIT: i32 = 120;
 const ID_ABOUT: i32 = 121;
 const CREDIT_H: i32 = 118;
+
+static DETECT_RESULT: Mutex<Option<Result<weather::Detected, String>>> = Mutex::new(None);
 
 thread_local! {
     static ST: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -136,12 +144,18 @@ unsafe fn build(panel: HWND) {
     };
 
     label("Location", y);
-    mk("EDIT", &cfg.location, (ES_AUTOHSCROLL as u32) | WS_TABSTOP, WS_EX_CLIENTEDGE, cx, y, 170, 22, ID_LOC);
-    mk("BUTTON", "Look up", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, cx + 178, y - 1, 70, 24, ID_LOOKUP);
+    let auto = mk("BUTTON", "Detect automatically (Windows location, then IP)", BS_AUTOCHECKBOX as u32 | WS_TABSTOP, 0, cx, y, 290, 20, ID_AUTO);
+    SendMessageW(auto, BM_SETCHECK_, cfg.auto_location as usize, 0);
     y += 26;
-    let status = if cfg.located() { format!("{}  ({:.2}, {:.2})", cfg.place, cfg.lat, cfg.lon) } else { "zip, \"City, ST\", lat,lon \u{2014} or empty to locate by IP".to_string() };
-    mk("STATIC", &status, 0, 0, cx, y, 280, 18, ID_STATUS);
-    y += 28;
+    // the box always shows something useful: the detected place when auto, else your override (pre-filled with the detection)
+    let shown = if cfg.auto_location || cfg.location.is_empty() { cfg.detected_text.clone() } else { cfg.location.clone() };
+    let dis = if cfg.auto_location { WS_DISABLED } else { 0 };
+    mk("EDIT", &shown, (ES_AUTOHSCROLL as u32) | WS_TABSTOP | dis, WS_EX_CLIENTEDGE, cx, y, 170, 22, ID_LOC);
+    mk("BUTTON", "Look up", BS_PUSHBUTTON as u32 | WS_TABSTOP | dis, 0, cx + 178, y - 1, 70, 24, ID_LOOKUP);
+    y += 26;
+    let status = if cfg.lat.is_finite() { format!("{}  ({:.2}, {:.2})", cfg.place, cfg.lat, cfg.lon) } else { "detecting\u{2026}".to_string() };
+    mk("STATIC", &status, 0, 0, cx, y, 290, 34, ID_STATUS);
+    y += 36;
 
     let chk = |t: &str, id: i32, on: bool, y: i32| {
         let h = mk("BUTTON", t, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, 0, cx, y, 280, 20, id);
@@ -325,13 +339,23 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 
 /// Pull every control back into a Config. Returns None (after telling the user) if the location can't be resolved.
 unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
-    let (mut cfg, resolved) = ST.with(|s| {
+    let (mut cfg, resolved, detected) = ST.with(|s| {
         let s = s.borrow();
         let s = s.as_ref().unwrap();
-        (s.cfg.clone(), s.resolved.clone())
+        (s.cfg.clone(), s.resolved.clone(), s.detected.clone())
     });
     let text = get_text(item(dlg, ID_LOC)).trim().to_string();
-    if text != cfg.resolved_for || !cfg.lat.is_finite() {
+    let auto = checked(dlg, ID_AUTO);
+    cfg.auto_location = auto;
+    if auto {
+        // detected values win; the typed override is left as it was
+        if let Some(d) = detected {
+            cfg.lat = d.lat;
+            cfg.lon = d.lon;
+            cfg.place = d.name;
+            cfg.detected_text = d.text;
+        }
+    } else if text != cfg.resolved_for || !cfg.lat.is_finite() {
         match resolved.filter(|r| r.3 == text) {
             Some((lat, lon, name, _)) => {
                 cfg.lat = lat;
@@ -357,7 +381,9 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
             None => {}
         }
     }
-    cfg.location = text;
+    if !auto {
+        cfg.location = text;
+    }
     cfg.fahrenheit = checked(dlg, ID_UNITS);
     cfg.clock24 = checked(dlg, ID_H24);
     cfg.seconds = checked(dlg, ID_SECS);
@@ -384,6 +410,31 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             build_footer(hwnd);
             make_preview(hwnd);
             layout(hwnd);
+            // detect in the background (Windows location can take a few seconds); WM_DETECTED delivers the result
+            let target = hwnd as usize;
+            std::thread::spawn(move || {
+                let r = weather::detect();
+                *DETECT_RESULT.lock().unwrap() = Some(r);
+                PostMessageW(target as HWND, WM_DETECTED, 0, 0);
+            });
+            return 0;
+        }
+        WM_DETECTED => {
+            let result = DETECT_RESULT.lock().unwrap().take();
+            let auto = checked(hwnd, ID_AUTO);
+            let edit = item(hwnd, ID_LOC);
+            match result {
+                Some(Ok(d)) => {
+                    set_text(item(hwnd, ID_STATUS), &format!("{}  ({:.2}, {:.2})\r\nvia {}", d.name, d.lat, d.lon, d.source));
+                    // pre-fill: always when auto; when typing an override, only if the box is still empty
+                    if auto || get_text(edit).trim().is_empty() {
+                        set_text(edit, &d.text);
+                    }
+                    ST.with(|s| s.borrow_mut().as_mut().unwrap().detected = Some(d));
+                }
+                Some(Err(e)) => set_text(item(hwnd, ID_STATUS), &format!("Couldn't detect your location:\r\n{e}")),
+                None => {}
+            }
             return 0;
         }
         WM_SIZE => {
@@ -415,6 +466,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as i32;
             match id {
+                ID_AUTO => update_auto_ui(hwnd),
                 ID_LOOKUP => {
                     let text = get_text(item(hwnd, ID_LOC)).trim().to_string();
                     SetCursor(LoadCursorW(null_mut(), IDC_WAIT));
@@ -510,6 +562,21 @@ unsafe fn show_credits(owner: HWND) {
     SendMessageW(edit, 0x00B1 /* EM_SETSEL */, 0, 0); // no selected text on open
 }
 
+/// Auto checkbox toggled: the box is read-only (showing the detected place) in auto mode, editable otherwise.
+unsafe fn update_auto_ui(dlg: HWND) {
+    let auto = checked(dlg, ID_AUTO);
+    EnableWindow(item(dlg, ID_LOC), (!auto) as i32);
+    EnableWindow(item(dlg, ID_LOOKUP), (!auto) as i32);
+    let detected = ST.with(|s| s.borrow().as_ref().and_then(|s| s.detected.clone()));
+    if let Some(d) = detected {
+        let edit = item(dlg, ID_LOC);
+        // switching to auto shows the detection again; switching to manual keeps it as the starting point to edit
+        if auto || get_text(edit).trim().is_empty() {
+            set_text(edit, &d.text);
+        }
+    }
+}
+
 unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_ERASEBKGND {
         return 1;
@@ -579,7 +646,7 @@ pub unsafe fn run(owner: HWND) {
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem() as i32;
     let font = CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr());
-    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now(), credit_bg: usize::MAX }));
+    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now(), credit_bg: usize::MAX, detected: None }));
 
     let hinst = GetModuleHandleW(null());
     let class = wide("WxScrConfig");

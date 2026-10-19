@@ -428,3 +428,84 @@ pub fn sample() -> Weather {
         sources: 0,
     }
 }
+
+// ───────────── automatic location: Windows Location Service, then IP address ─────────────
+#[derive(Clone, Debug)]
+pub struct Detected {
+    pub lat: f64,
+    pub lon: f64,
+    /// Display name, e.g. "North Canton, OH".
+    pub name: String,
+    /// What to pre-fill the Location box with: a zip for US places, else "City, Region" (both re-geocodable).
+    pub text: String,
+    /// Where the fix came from, e.g. "Windows location" or "IP address (Windows location unavailable: ...)".
+    pub source: String,
+}
+
+fn detect_windows() -> Result<(f64, f64), String> {
+    use windows::Devices::Geolocation::{Geolocator, PositionAccuracy};
+    use windows::Foundation::TimeSpan;
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
+    let err = |e: windows::core::Error| e.message();
+    // WinRT needs COM on this thread; "already initialised with another mode" is fine to ignore
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+    let geo = Geolocator::new().map_err(err)?;
+    geo.SetDesiredAccuracy(PositionAccuracy::Default).map_err(err)?;
+    let (max_age, timeout) = (TimeSpan { Duration: 10 * 60 * 10_000_000 }, TimeSpan { Duration: 8 * 10_000_000 });
+    let pos = geo.GetGeopositionAsyncWithAgeAndTimeout(max_age, timeout).map_err(err)?.join().map_err(err)?;
+    let p = pos.Coordinate().map_err(err)?.Point().map_err(err)?.Position().map_err(err)?;
+    Ok((p.Latitude, p.Longitude))
+}
+
+fn detect_ip() -> Result<Detected, String> {
+    let j = get_json("https://ipwho.is/")?;
+    let (lat, lon) = (j["latitude"].as_f64().ok_or("IP lookup failed")?, j["longitude"].as_f64().ok_or("IP lookup failed")?);
+    let city = j["city"].as_str().unwrap_or("");
+    let region = j["region_code"].as_str().unwrap_or("");
+    let name = [city, region].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(", ");
+    let postal = j["postal"].as_str().unwrap_or("");
+    let text = if j["country_code"].as_str() == Some("US") && !postal.is_empty() { postal.to_string() } else { name.clone() };
+    Ok(Detected { lat, lon, name, text, source: "IP address".into() })
+}
+
+/// Turn coordinates into a display name and a re-geocodable text (best effort; falls back to the coordinates).
+fn reverse(lat: f64, lon: f64) -> (String, String) {
+    let coords = format!("{lat:.3}, {lon:.3}");
+    let Ok(j) = get_json(&format!("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat:.5}&longitude={lon:.5}&localityLanguage=en")) else {
+        return (coords.clone(), coords);
+    };
+    let s = |k: &str| j[k].as_str().unwrap_or("").to_string();
+    let city = if !s("city").is_empty() { s("city") } else { s("locality") };
+    // "Township of Lake" -> "Lake Township"
+    let city = match city.strip_prefix("Township of ") {
+        Some(rest) => format!("{rest} Township"),
+        None => city,
+    };
+    let region = j["principalSubdivisionCode"].as_str().and_then(|c| c.split('-').nth(1)).map(String::from).unwrap_or_else(|| s("principalSubdivision"));
+    let name = [city, region].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(", ");
+    if name.is_empty() {
+        return (coords.clone(), coords);
+    }
+    let zip = s("postcode");
+    let text = if s("countryCode") == "US" && !zip.is_empty() { zip } else { name.clone() };
+    (name, text)
+}
+
+/// Best available fix: Windows Location Service first, then the IP address.
+pub fn detect() -> Result<Detected, String> {
+    match detect_windows() {
+        Ok((lat, lon)) => {
+            let (name, text) = reverse(lat, lon);
+            Ok(Detected { lat, lon, name, text, source: "Windows location".into() })
+        }
+        Err(w) => match detect_ip() {
+            Ok(mut d) => {
+                d.source = format!("IP address (Windows location unavailable: {})", w.trim());
+                Ok(d)
+            }
+            Err(i) => Err(format!("Windows location: {}; IP lookup: {}", w.trim(), i)),
+        },
+    }
+}
