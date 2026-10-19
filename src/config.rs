@@ -33,6 +33,10 @@ pub struct Config {
     pub refresh_min: u32,
     /// Empty = the bundled Droid Sans Mono.
     pub font: String,
+    /// How the text is kept readable over busy backgrounds: 0 soft shadow, 1 black halo, 2 black outline.
+    pub contrast: usize,
+    /// Fade in / out of the screensaver: index into render::TRANS_NAMES (last = random).
+    pub transition: usize,
 }
 
 impl Default for Config {
@@ -56,6 +60,8 @@ impl Default for Config {
             monitors: 0,
             refresh_min: 20,
             font: String::new(),
+            contrast: 0,
+            transition: 2,
         }
     }
 }
@@ -99,6 +105,12 @@ impl Config {
         c.monitors = (nu("monitors", c.monitors as u64) as usize).min(2);
         c.refresh_min = nu("refresh_min", c.refresh_min as u64).clamp(5, 180) as u32;
         c.font = st("font", "");
+        c.contrast = (nu("contrast", c.contrast as u64) as usize).min(crate::render::CONTRAST_NAMES.len() - 1);
+        c.transition = match &v["transition"] {
+            Value::String(id) => crate::render::TRANS_IDS.iter().position(|x| x == id).unwrap_or(c.transition),
+            Value::Number(n) => crate::render::transition_from_legacy(n.as_u64().unwrap_or(2)),
+            _ => c.transition,
+        };
         c
     }
 
@@ -111,6 +123,7 @@ impl Config {
             "details": self.details, "background": crate::bg::index_to_id(self.background),
             "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
+            "contrast": self.contrast, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),
         });
         let _ = std::fs::write(path(), serde_json::to_string_pretty(&v).unwrap_or_default());
     }

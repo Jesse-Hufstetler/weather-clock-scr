@@ -8,6 +8,8 @@ use crate::config::Config;
 use crate::gl::{self, Gl};
 use crate::text::Rasterizer;
 use crate::weather::Weather;
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use windows_sys::Win32::Foundation::{HWND, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::Graphics::OpenGL::*;
@@ -22,6 +24,38 @@ const NOISE_N: usize = 256;
 /// Multipass simulations advance at this fixed rate, whatever the display's refresh rate is.
 const SIM_STEP: f64 = 1.0 / 60.0;
 
+pub const CONTRAST_NAMES: [&str; 3] = ["Soft shadow", "Black halo (blurs out)", "Black outline"];
+/// Transition styles; index 0 is "None" and the last entry picks a random one each time.
+pub const TRANS_NAMES: [&str; 5] = ["None (instant)", "Fade", "Blur fade", "Zoom", "Random"];
+/// Stable names stored in config.json (same order as TRANS_NAMES), so reordering or removing styles never changes what a
+/// saved choice means.
+pub const TRANS_IDS: [&str; 5] = ["none", "fade", "blur", "zoom", "random"];
+
+/// Older configs stored the position in an earlier list (none, fade, blur, wipe, slide, iris, zoom, random).
+pub fn transition_from_legacy(n: u64) -> usize {
+    match n {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        6 => 3, // zoom
+        7 => 4, // random
+        _ => 2, // wipe, slide and iris no longer exist: use the default (blur fade)
+    }
+}
+
+/// Seconds the screensaver takes to appear / to disappear after you touch something.
+pub const TRANS_IN_SECS: f64 = 0.9;
+pub const TRANS_OUT_SECS: f64 = 0.5;
+
+/// Turn the configured choice into a concrete style 0..=3 (the "Random" entry rolls a die from `salt`).
+pub fn resolve_transition(choice: usize, salt: u64) -> usize {
+    if choice + 1 >= TRANS_NAMES.len() {
+        1 + (salt.wrapping_mul(2654435761) >> 7) as usize % (TRANS_NAMES.len() - 2)
+    } else {
+        choice
+    }
+}
+
 pub struct Frame<'a> {
     pub t: f64,
     pub cfg: &'a Config,
@@ -29,6 +63,9 @@ pub struct Frame<'a> {
     pub show_text: bool,
     pub bg: usize,
     pub now: SYSTEMTIME,
+    /// Transition state: how visible the scene is (1 = normal, 0 = the old screen) and the style (see TRANS_NAMES).
+    pub vis: f32,
+    pub tstyle: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -37,8 +74,55 @@ struct Run {
     w: i32,
     h: i32,
     pad: i32,
-    /// Pre-blurred, low-resolution copy of the mask used for the drop shadow (bilinear-upscaled = smooth).
+    /// Pre-blurred, low-resolution copy of the mask used for the shadow / halo / outline (bilinear-upscaled = smooth).
     sh_tex: u32,
+}
+
+/// A text run rasterised and blurred off the render thread (or on it, the first time).
+struct Prepared {
+    w: i32,
+    h: i32,
+    pad: i32,
+    data: Vec<u8>,
+    sdata: Vec<u8>,
+    sw: usize,
+    sh: usize,
+}
+
+struct Job {
+    key: String,
+    text: String,
+    px: i32,
+    pad: i32,
+    th: i32,
+    style: usize,
+    face: String,
+}
+
+/// Rasterise `text` and build the blurred companion mask for the chosen contrast style.
+fn prepare(rast: &mut Rasterizer, text: &str, px: i32, pad: i32, th: i32, style: usize) -> Prepared {
+    let r = rast.raster(text, px, pad);
+    let thf = th as f32;
+    let (f, radius) = match style {
+        // halo: a wide blur; the shader turns it into "fully black near the text, fading to nothing"
+        1 => {
+            let f = (th / 270).max(2);
+            (f, ((0.017 * thf) / f as f32 - 0.5).round().max(1.0) as usize)
+        }
+        // outline: an exact distance-based dilation at full resolution, so the thickness is the same everywhere
+        2 => {
+            let sdata = outline_mask(&r.data, r.w as usize, r.h as usize, 0.006 * thf);
+            let (w, h) = (r.w as usize, r.h as usize);
+            return Prepared { w: r.w, h: r.h, pad: r.pad, data: r.data, sdata, sw: w, sh: h };
+        }
+        // soft shadow (the original look)
+        _ => {
+            let f = (th / 270).max(2);
+            (f, ((0.0075 * thf) / f as f32).round().max(1.0) as usize)
+        }
+    };
+    let (sdata, sw, sh) = blur_lowres(&r.data, r.w as usize, r.h as usize, f as usize, radius);
+    Prepared { w: r.w, h: r.h, pad: r.pad, data: r.data, sdata, sw, sh }
 }
 
 struct Locs {
@@ -51,6 +135,13 @@ struct Locs {
     text_alpha: i32,
     text_shoff: i32,
     text_sh: i32,
+    text_mode: i32,
+    text_pass: i32,
+    tr_scene: i32,
+    tr_outside: i32,
+    tr_p: i32,
+    tr_style: i32,
+    tr_res: i32,
 }
 
 /// A Shadertoy-style multipass background: up to four buffers (each a ping-pong pair of float textures) + Image.
@@ -85,10 +176,25 @@ pub struct Renderer {
     fw: i32,
     fh: i32,
     rast: Rasterizer,
+    face: String,
     runs: [Run; 8],
     keys: [String; 8],
+    /// Background worker that rasterises the next clock string ahead of time, so the once-a-second text
+    /// change costs only a texture upload on the render thread.
+    jobs: Sender<Job>,
+    done: Receiver<(String, Prepared)>,
+    ready: HashMap<String, Prepared>,
+    pending: HashSet<String>,
     multi: Option<MultiState>,
     sim_fbo: u32,
+    trans_prog: u32,
+    /// Offscreen copy of the finished frame, only used while a transition is running.
+    sc_fbo: u32,
+    sc_tex: u32,
+    sc_w: i32,
+    sc_h: i32,
+    /// The screen as it was before the screensaver appeared (or is behind it when it leaves); 1x1 black until set.
+    out_tex: u32,
 }
 
 const BLIT_FS: &str = "#version 120
@@ -101,14 +207,59 @@ void main(){
   gl_FragColor = vec4(c, 1.0);
 }";
 
+/// `mode` 0: soft drop shadow. 1: black halo, like stacking blurred black copies behind the text so it goes from
+/// fully opaque next to the glyphs to fully transparent. 2: thick black outline (distance-based dilation of the glyphs).
 const TEXT_FS: &str = "#version 120
-uniform sampler2D tex; uniform sampler2D sh; uniform float alpha; uniform vec2 shoff; varying vec2 uv;
+uniform sampler2D tex; uniform sampler2D sh; uniform float alpha; uniform vec2 shoff; uniform int mode; uniform int pass; varying vec2 uv;
 void main(){
   float m = texture2D(tex, uv).r;
-  float s = texture2D(sh, uv - shoff).r + texture2D(sh, uv + shoff).r;
-  s = clamp(s * 1.25, 0.0, 1.0) * 0.9;
-  float a = m + (1.0 - m) * s;
-  gl_FragColor = vec4(vec3(m), a) * alpha;
+  float s;
+  if (mode == 1) {
+    s = 1.0 - exp(-9.0 * texture2D(sh, uv).r);
+  } else if (mode == 2) {
+    s = texture2D(sh, uv).r;
+  } else {
+    s = texture2D(sh, uv - shoff).r + texture2D(sh, uv + shoff).r;
+    s = clamp(s * 1.25, 0.0, 1.0) * 0.9;
+  }
+  // pass 0 paints every run's black backdrop (shadow / halo / outline), pass 1 then paints the glyphs over all of it,
+  // so one run's outline never cuts into a neighbouring run's letters
+  if (pass == 0) gl_FragColor = vec4(0.0, 0.0, 0.0, s) * alpha;
+  else gl_FragColor = vec4(vec3(m), m) * alpha;
+}";
+
+/// Final pass while the screensaver is appearing or disappearing. `p` is visibility (0 black .. 1 normal).
+const TRANS_FS: &str = "#version 120
+uniform sampler2D scene; uniform sampler2D outside; uniform float p; uniform int style; uniform vec2 res; varying vec2 uv;
+float ease(float x){ x = clamp(x, 0.0, 1.0); return x*x*x*(x*(x*6.0-15.0)+10.0); }
+// B = the screensaver frame, A = what was on screen before it started / is behind it when it ends (black if unknown)
+vec3 B(vec2 c){ return texture2D(scene, clamp(c, 0.0, 1.0)).rgb; }
+vec3 A(vec2 c){ return texture2D(outside, clamp(c, 0.0, 1.0)).rgb; }
+void main(){
+  float e = ease(p);
+  float asp = res.x / res.y;
+  vec3 c;
+  if (style == 2) {
+    // cross blur: both pictures defocus as they swap, the screensaver sharpening out of the haze
+    float r = sin(3.14159265 * e) * 0.06;
+    vec3 a = vec3(0.0);
+    vec3 b = vec3(0.0);
+    for (int i = 0; i < 24; i++) {
+      float ang = float(i) * 2.39996;
+      float rr = sqrt((float(i) + 0.5) / 24.0);
+      vec2 o = vec2(cos(ang) / asp, sin(ang)) * rr * r;
+      a += A(uv + o);
+      b += B(uv + o);
+    }
+    c = mix(a, b, smoothstep(0.15, 0.85, e)) / 24.0;
+  } else if (style == 3) {
+    // zoom: the screensaver pulls back from a close-up as it fades over the old screen (and dives in as it leaves)
+    float s = mix(0.62, 1.0, e);
+    c = mix(A(uv), B((uv - 0.5) * s + 0.5), e);
+  } else {
+    c = mix(A(uv), B(uv), e);
+  }
+  gl_FragColor = vec4(c, 1.0);
 }";
 
 impl Renderer {
@@ -136,6 +287,7 @@ impl Renderer {
         }
         let blit_prog = gl::program(&g, BLIT_FS)?;
         let text_prog = gl::program(&g, TEXT_FS)?;
+        let trans_prog = gl::program(&g, TRANS_FS)?;
         let bg_prog = gl::program(&g, &bg::source(bg_idx))?;
         let loc = Locs {
             bg_res: gl::uloc(&g, bg_prog, "wx_res"),
@@ -147,7 +299,29 @@ impl Renderer {
             text_alpha: gl::uloc(&g, text_prog, "alpha"),
             text_shoff: gl::uloc(&g, text_prog, "shoff"),
             text_sh: gl::uloc(&g, text_prog, "sh"),
+            text_mode: gl::uloc(&g, text_prog, "mode"),
+            text_pass: gl::uloc(&g, text_prog, "pass"),
+            tr_scene: gl::uloc(&g, trans_prog, "scene"),
+            tr_outside: gl::uloc(&g, trans_prog, "outside"),
+            tr_p: gl::uloc(&g, trans_prog, "p"),
+            tr_style: gl::uloc(&g, trans_prog, "style"),
+            tr_res: gl::uloc(&g, trans_prog, "res"),
         };
+        let (jobs, job_rx) = channel::<Job>();
+        let (done_tx, done) = channel::<(String, Prepared)>();
+        std::thread::spawn(move || {
+            // the worker owns its own GDI rasteriser (a device context must stay on the thread that made it)
+            let mut rast: Option<(String, Rasterizer)> = None;
+            while let Ok(job) = job_rx.recv() {
+                if rast.as_ref().map_or(true, |(face, _)| *face != job.face) {
+                    rast = Some((job.face.clone(), Rasterizer::new(&job.face)));
+                }
+                let p = prepare(&mut rast.as_mut().unwrap().1, &job.text, job.px, job.pad, job.th, job.style);
+                if done_tx.send((job.key, p)).is_err() {
+                    break;
+                }
+            }
+        });
         let mut r = Renderer {
             vsync,
             hdc,
@@ -166,19 +340,75 @@ impl Renderer {
             fw: 0,
             fh: 0,
             rast: Rasterizer::new(&cfg.font),
+            face: cfg.font.clone(),
             runs: [Run::default(); 8],
             keys: Default::default(),
+            jobs,
+            done,
+            ready: HashMap::new(),
+            pending: HashSet::new(),
             multi: None,
             sim_fbo: 0,
+            trans_prog,
+            sc_fbo: 0,
+            sc_tex: 0,
+            sc_w: 0,
+            sc_h: 0,
+            out_tex: 0,
         };
+        r.set_outside(1, 1, &[0, 0, 0, 255]);
         r.ensure_fbo(w, h);
         Ok(r)
+    }
+
+    /// Give the transitions something to blend with: a BGRA, bottom-up screenshot of the screen without the saver.
+    pub unsafe fn set_outside(&mut self, w: i32, h: i32, bgra: &[u8]) {
+        const GL_BGRA: u32 = 0x80E1;
+        wglMakeCurrent(self.hdc, self.rc);
+        if self.out_tex == 0 {
+            glGenTextures(1, &mut self.out_tex);
+        }
+        glBindTexture(GL_TEXTURE_2D, self.out_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra.as_ptr() as *const _);
     }
 
     /// Swap the text font (settings preview); cached glyph runs are rebuilt on the next frame.
     pub fn set_font(&mut self, face: &str) {
         self.rast = Rasterizer::new(face);
+        self.face = face.to_string();
         self.keys = Default::default();
+        self.ready.clear();
+        self.pending.clear();
+    }
+
+    /// Offscreen colour buffer the finished frame is drawn into while a transition runs.
+    unsafe fn ensure_scene(&mut self, tw: i32, th: i32) {
+        let (w, h) = (tw.max(16), th.max(16));
+        if self.sc_fbo != 0 && w == self.sc_w && h == self.sc_h {
+            return;
+        }
+        if self.sc_fbo == 0 {
+            (self.gl.GenFramebuffers)(1, &mut self.sc_fbo);
+        } else {
+            glDeleteTextures(1, &self.sc_tex);
+        }
+        glGenTextures(1, &mut self.sc_tex);
+        glBindTexture(GL_TEXTURE_2D, self.sc_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.sc_fbo);
+        (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.sc_tex, 0);
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
+        self.sc_w = w;
+        self.sc_h = h;
     }
 
     unsafe fn ensure_fbo(&mut self, tw: i32, th: i32) {
@@ -226,16 +456,45 @@ impl Renderer {
         glEnd();
     }
 
-    unsafe fn upload(&mut self, slot: usize, text: &str, px: i32, pad: i32, th: i32) {
-        let key = format!("{px}|{pad}|{text}");
+    fn text_key(&self, text: &str, px: i32, pad: i32, style: usize) -> String {
+        format!("{}|{px}|{pad}|{style}|{text}", self.face)
+    }
+
+    /// Collect finished background rasterisations.
+    fn drain(&mut self) {
+        while let Ok((k, p)) = self.done.try_recv() {
+            self.pending.remove(&k);
+            if self.ready.len() > 8 {
+                self.ready.clear();
+            }
+            self.ready.insert(k, p);
+        }
+    }
+
+    /// Ask the worker to rasterise a string we expect to need soon (e.g. the clock text for the next second).
+    fn prefetch(&mut self, text: &str, px: i32, pad: i32, th: i32, style: usize) {
+        let key = self.text_key(text, px, pad, style);
+        if self.ready.contains_key(&key) || self.pending.contains(&key) || self.keys.contains(&key) {
+            return;
+        }
+        let job = Job { key: key.clone(), text: text.to_string(), px, pad, th, style, face: self.face.clone() };
+        if self.jobs.send(job).is_ok() {
+            self.pending.insert(key);
+        }
+    }
+
+    unsafe fn upload(&mut self, slot: usize, text: &str, px: i32, pad: i32, th: i32, style: usize) {
+        let key = self.text_key(text, px, pad, style);
         if self.keys[slot] == key {
             return;
         }
-        let r = self.rast.raster(text, px, pad);
-        // shadow: shrink the mask, box-blur it three times (~Gaussian), keep it small and bilinear-filtered
-        let f = (th / 270).max(2);
-        let radius = ((0.0075 * th as f32) / f as f32).round().max(1.0) as usize;
-        let (sdata, sw, sh) = blur_lowres(&r.data, r.w as usize, r.h as usize, f as usize, radius);
+        self.drain();
+        // use the worker's result if it has one; otherwise (first frame, size change) do it here
+        let r = match self.ready.remove(&key) {
+            Some(p) => p,
+            None => prepare(&mut self.rast, text, px, pad, th, style),
+        };
+        let (sw, sh) = (r.sw as i32, r.sh as i32);
         let run = &mut self.runs[slot];
         if run.tex == 0 {
             glGenTextures(1, &mut run.tex);
@@ -243,7 +502,7 @@ impl Renderer {
         }
         glBindTexture(GL_TEXTURE_2D, run.sh_tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, gl::LUMINANCE8 as i32, sw as i32, sh as i32, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, sdata.as_ptr() as *const _);
+        glTexImage2D(GL_TEXTURE_2D, 0, gl::LUMINANCE8 as i32, sw, sh, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, r.sdata.as_ptr() as *const _);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
@@ -444,8 +703,16 @@ impl Renderer {
             (self.gl.Uniform1f)(self.loc.bg_time, sim_t);
             Self::quad(-1.0, -1.0, 1.0, 1.0, false);
         }
-        // 2. blit to target
-        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, target.map_or(0, |t| t.0));
+        // 2. blit to target (or to the scene buffer first, while a transition is running)
+        let target_fbo = target.map_or(0, |t| t.0);
+        let trans = f.vis < 0.999 && f.tstyle != 0;
+        let dst = if trans {
+            self.ensure_scene(tw, th);
+            self.sc_fbo
+        } else {
+            target_fbo
+        };
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, dst);
         glViewport(0, 0, tw, th);
         (self.gl.UseProgram)(self.blit_prog);
         (self.gl.ActiveTexture)(gl::TEXTURE0);
@@ -458,6 +725,23 @@ impl Renderer {
         if f.show_text {
             self.draw_text(f, tw, th);
         }
+        // 4. transition: the finished frame goes through the transition shader to the real target
+        if trans {
+            (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, target_fbo);
+            glViewport(0, 0, tw, th);
+            (self.gl.UseProgram)(self.trans_prog);
+            (self.gl.ActiveTexture)(gl::TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, self.sc_tex);
+            (self.gl.Uniform1i)(self.loc.tr_scene, 0);
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
+            glBindTexture(GL_TEXTURE_2D, self.out_tex);
+            (self.gl.ActiveTexture)(gl::TEXTURE0);
+            (self.gl.Uniform1i)(self.loc.tr_outside, 1);
+            (self.gl.Uniform1f)(self.loc.tr_p, f.vis.max(0.0));
+            (self.gl.Uniform1i)(self.loc.tr_style, f.tstyle as i32);
+            (self.gl.Uniform2f)(self.loc.tr_res, tw as f32, th as f32);
+            Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+        }
         if target.is_none() {
             SwapBuffers(self.hdc);
         }
@@ -467,7 +751,10 @@ impl Renderer {
         let hh = th as f32;
         let (em1, emc, em2, em3, em4) = ((0.19 * hh) as i32, (0.034 * hh) as i32, (0.085 * hh) as i32, (0.25 * hh) as i32, (0.036 * hh) as i32);
         let pad = (0.035 * hh).ceil() as i32;
+        // the dew point is the secondary reading: noticeably smaller than the feels-like temperature
+        let em_dew = (0.72 * em1 as f32) as i32;
         let cfg = f.cfg;
+        let style = cfg.contrast;
         let st = &f.now;
 
         const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -477,50 +764,62 @@ impl Renderer {
         let date = format!("{} {}{} {}", MONTHS[(st.wMonth as usize).clamp(1, 12) - 1], d, suffix, st.wYear);
         let hour = if cfg.clock24 { st.wHour as u32 } else { (st.wHour as u32 + 11) % 12 + 1 };
         let time = if cfg.seconds { format!("{}:{:02}:{:02}", hour, st.wMinute, st.wSecond) } else { format!("{}:{:02}", hour, st.wMinute) };
+        // what the clock will read a second (or, without seconds, a minute) from now, for the background worker
+        let next_time = {
+            let step = if cfg.seconds { 1 } else { 60 };
+            let tot = (st.wHour as u32 * 3600 + st.wMinute as u32 * 60 + st.wSecond as u32 + step) % 86400;
+            let (h, m, s) = (tot / 3600, tot / 60 % 60, tot % 60);
+            let h = if cfg.clock24 { h } else { (h + 11) % 12 + 1 };
+            if cfg.seconds { format!("{}:{:02}:{:02}", h, m, s) } else { format!("{}:{:02}", h, m) }
+        };
 
         // rows: weather (day / feels / dew + captions), date, time, details
         let temp_s = |v: f64| format!("{}\u{b0}", (if cfg.fahrenheit { v } else { (v - 32.0) * 5.0 / 9.0 }).round() as i64);
         let has_wx = f.wx.is_some();
         if let Some(w) = f.wx {
-            self.upload(0, DAYS[(st.wDayOfWeek as usize) % 7], em1, pad, th);
-            self.upload(1, &temp_s(w.feels), em1, pad, th);
-            self.upload(2, &temp_s(w.dew), em1, pad, th);
-            self.upload(3, "feels like", emc, pad, th);
-            self.upload(4, "dew point", emc, pad, th);
+            self.upload(0, DAYS[(st.wDayOfWeek as usize) % 7], em1, pad, th, style);
+            self.upload(1, &temp_s(w.feels), em1, pad, th, style);
+            self.upload(2, &temp_s(w.dew), em_dew, pad, th, style);
+            self.upload(3, "feels like", emc, pad, th, style);
+            self.upload(4, "dew point", emc, pad, th, style);
         }
-        self.upload(5, &date, em2, pad, th);
-        self.upload(6, &time, em3, pad, th);
+        self.upload(5, &date, em2, pad, th, style);
+        self.upload(6, &time, em3, pad, th, style);
+        self.prefetch(&next_time, em3, pad, th, style);
         let details = if cfg.details { f.wx.map(|w| details_line(w, cfg)).unwrap_or_default() } else { String::new() };
         let has_details = !details.is_empty();
         if has_details {
-            self.upload(7, &details, em4, pad, th);
+            self.upload(7, &details, em4, pad, th, style);
         }
 
         // layout in pixels, origin at the block's centre; y grows downward
         let cw = |r: &Run| (r.w - 2 * r.pad) as f32;
         let chh = |r: &Run| (r.h - 2 * r.pad) as f32;
         let r = self.runs;
-        let mut items: Vec<(usize, f32, f32, f32)> = Vec::new(); // slot, x (left), y (top), alpha
+        let mut items: Vec<(usize, f32, f32)> = Vec::new(); // slot, x (left), y (top)
         let mut y = 0.0f32;
         if has_wx {
             let gap = em1 as f32 * 0.55;
-            let total = cw(&r[0]) + gap + cw(&r[1]) + gap + cw(&r[2]);
+            // each reading sits in a column as wide as the wider of the number and its caption
+            let (wt, ww) = (cw(&r[1]).max(cw(&r[3])), cw(&r[2]).max(cw(&r[4])));
+            let total = cw(&r[0]) + gap + wt + gap + ww;
             let x0 = -total / 2.0;
-            let (xd, xt, xw) = (x0, x0 + cw(&r[0]) + gap, x0 + cw(&r[0]) + gap + cw(&r[1]) + gap);
-            items.push((0, xd, y, 1.0));
-            items.push((1, xt, y, 1.0));
-            items.push((2, xw, y, 0.62));
+            let (xd, xt, xw) = (x0, x0 + cw(&r[0]) + gap, x0 + cw(&r[0]) + gap + wt + gap);
+            items.push((0, xd, y));
+            items.push((1, xt + (wt - cw(&r[1])) / 2.0, y));
+            // the smaller dew point shares the baseline (bottom edge) of the feels-like number
+            items.push((2, xw + (ww - cw(&r[2])) / 2.0, y + chh(&r[1]) - chh(&r[2])));
             let cy = y + chh(&r[1]) * 0.80;
-            items.push((3, xt + (cw(&r[1]) - cw(&r[3])) / 2.0, cy, 0.7));
-            items.push((4, xw + (cw(&r[2]) - cw(&r[4])) / 2.0, cy, 0.7));
+            items.push((3, xt + (wt - cw(&r[3])) / 2.0, cy));
+            items.push((4, xw + (ww - cw(&r[4])) / 2.0, cy));
             y = cy + chh(&r[3]) * 0.95 + em2 as f32 * 0.10;
         }
-        items.push((5, -cw(&r[5]) / 2.0, y, 1.0));
+        items.push((5, -cw(&r[5]) / 2.0, y));
         y += chh(&r[5]) * 0.92;
-        items.push((6, -cw(&r[6]) / 2.0, y, 1.0));
+        items.push((6, -cw(&r[6]) / 2.0, y));
         y += chh(&r[6]) * 0.90;
         if has_details {
-            items.push((7, -cw(&r[7]) / 2.0, y, 0.6));
+            items.push((7, -cw(&r[7]) / 2.0, y));
             y += chh(&r[7]);
         }
         let block_h = y;
@@ -539,8 +838,12 @@ impl Renderer {
         (self.gl.ActiveTexture)(gl::TEXTURE0);
         (self.gl.Uniform1i)(self.loc.text_tex, 0);
         (self.gl.Uniform1i)(self.loc.text_sh, 1);
+        (self.gl.Uniform1i)(self.loc.text_mode, style as i32);
+        (self.gl.Uniform1f)(self.loc.text_alpha, 1.0);
         let sh_px = 0.009 * hh;
-        for (slot, x, ly, alpha) in items {
+        for pass in 0..2 {
+        (self.gl.Uniform1i)(self.loc.text_pass, pass);
+        for &(slot, x, ly) in &items {
             let run = self.runs[slot];
             let (sx, sy) = (cx + x * s - run.pad as f32 * s, cy0 + (ly - block_h / 2.0) * s - run.pad as f32 * s);
             let (qw, qh) = (run.w as f32 * s, run.h as f32 * s);
@@ -548,10 +851,10 @@ impl Renderer {
             glBindTexture(GL_TEXTURE_2D, run.sh_tex);
             (self.gl.ActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, run.tex);
-            (self.gl.Uniform1f)(self.loc.text_alpha, alpha);
             (self.gl.Uniform2f)(self.loc.text_shoff, sh_px / run.w as f32, sh_px / run.h as f32);
             let ndc = |px: f32, size: f32| px / size * 2.0 - 1.0;
             Self::quad(ndc(sx, tw as f32), -ndc(sy + qh, th as f32), ndc(sx + qw, tw as f32), -ndc(sy, th as f32), true);
+        }
         }
         glDisable(GL_BLEND);
     }
@@ -569,7 +872,7 @@ impl Renderer {
         if bg::is_multi(f.bg) {
             // feedback simulations need history: run ~4 s of steps first
             for k in 0..240 {
-                let warm = Frame { t: f.t - (240 - k) as f64 / 60.0, cfg: f.cfg, wx: f.wx, show_text: false, bg: f.bg, now: f.now };
+                let warm = Frame { t: f.t - (240 - k) as f64 / 60.0, cfg: f.cfg, wx: f.wx, show_text: false, bg: f.bg, now: f.now, vis: 1.0, tstyle: 0 };
                 self.render(&warm, Some((fbo, w, h)));
             }
         }
@@ -610,6 +913,62 @@ fn details_line(w: &Weather, cfg: &Config) -> String {
         parts.push(format!("{label} {clock}"));
     }
     parts.join("   \u{b7}   ")
+}
+
+/// Outline alpha for a glyph mask: 1 inside `radius` pixels of any glyph pixel (distance measured with an exact
+/// Euclidean distance transform), fading over the last pixel so the outer edge is anti-aliased.
+fn outline_mask(src: &[u8], w: usize, h: usize, radius: f32) -> Vec<u8> {
+    const INF: f32 = 1.0e12;
+    // squared distance to the nearest glyph pixel (Felzenszwalb & Huttenlocher), columns then rows
+    let mut d: Vec<f32> = src.iter().map(|&v| if v >= 128 { 0.0 } else { INF }).collect();
+    let n = w.max(h);
+    let (mut f, mut out, mut z) = (vec![0f32; n], vec![0f32; n], vec![0f32; n + 1]);
+    let mut v = vec![0usize; n];
+    let mut pass = |len: usize, f: &[f32], out: &mut [f32]| {
+        let mut k = 0usize;
+        v[0] = 0;
+        z[0] = -INF;
+        z[1] = INF;
+        for q in 1..len {
+            let mut s;
+            loop {
+                let p = v[k];
+                s = ((f[q] + (q * q) as f32) - (f[p] + (p * p) as f32)) / (2.0 * (q as f32 - p as f32));
+                if k > 0 && s <= z[k] {
+                    k -= 1;
+                } else {
+                    break;
+                }
+            }
+            k += 1;
+            v[k] = q;
+            z[k] = s;
+            z[k + 1] = INF;
+        }
+        k = 0;
+        for q in 0..len {
+            while z[k + 1] < q as f32 {
+                k += 1;
+            }
+            let dq = q as f32 - v[k] as f32;
+            out[q] = dq * dq + f[v[k]];
+        }
+    };
+    for x in 0..w {
+        for y in 0..h {
+            f[y] = d[y * w + x];
+        }
+        pass(h, &f, &mut out);
+        for y in 0..h {
+            d[y * w + x] = out[y];
+        }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&d[y * w..(y + 1) * w]);
+        pass(w, &f, &mut out);
+        d[y * w..(y + 1) * w].copy_from_slice(&out[..w]);
+    }
+    d.iter().map(|&sq| ((radius - sq.sqrt() + 0.5).clamp(0.0, 1.0) * 255.0) as u8).collect()
 }
 
 /// Box-downsample a mask by `f`, then blur it with three box passes of `radius`. Returns (data, w, h).

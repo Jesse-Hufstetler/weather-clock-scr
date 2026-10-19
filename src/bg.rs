@@ -2,7 +2,7 @@
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
 pub const NAMES: [&str; 14] = [
-    "Original bubbles (dash2)",
+    "Bubbles (SKEENSAVUH, Shadertoy)",
     "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
@@ -52,11 +52,11 @@ const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated
 
 pub const CREDITS: [Credit; 14] = [
     Credit {
-        author: "Jesse Hufstetler (ported from dash2.html)",
+        author: "Jesse Hufstetler (JesseHufstetler on Shadertoy)",
         license: "Own work",
-        source: "jesse-hufstetler.github.io/dash2.html",
-        retrieved: "2026-10-18",
-        changes: "Dither moved to the final blit; otherwise a straight port",
+        source: "shadertoy.com/view/l3XGRB",
+        retrieved: "2026-10-19",
+        changes: "Renamed a parameter called exp (it shadowed the GLSL built-in); otherwise unmodified",
     },
     Credit {
         author: "SnoopethDuckDuck (fork of \"starting point 8008\")",
@@ -264,58 +264,8 @@ fn single(i: usize) -> Option<&'static str> {
     })
 }
 
-/// Straight port of the shader in dash2.html (dither moved to the final blit).
-const BUBBLES: &str = r#"
-vec3 rgb2hsv(vec3 c){
-    vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
-    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-    float d = q.x - min(q.w, q.y);
-    float e = 1.0e-10;
-    return vec3(abs(q.z + (q.w - q.y) / (6.0*d + e)), d / (q.x + e), q.x);
-}
-vec3 hsv2rgb(vec3 c){
-    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
-void bub(inout vec4 fc, vec2 fragCoord, float radius, vec2 center, vec3 col, float e){
-    float dis = length(fragCoord - center);
-    float disN = dis / radius;
-    if (dis < radius) fc.xyz += pow(1.0 - disN, e) * col;
-}
-void slideBub(inout vec4 fc, vec2 fragCoord, float radius, vec2 speed, vec3 col, float e){
-    vec2 center = (sin(iTime*speed + speed*500.0) * iResolution.xy + iResolution.xy) / 2.0;
-    bub(fc, fragCoord, radius, center, col, e);
-}
-void mainImage(out vec4 fragColor, in vec2 fragCoord){
-    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    float divvy = 0.999;
-    float size = 3.0;
-    vec3 pink = vec3(1.0, 0.5, 1.0);
-    vec3 yellow = vec3(1.0, 1.0, 0.5);
-    vec3 blue = vec3(0.5, 0.9, 1.0);
-    vec3 lightPink = vec3(1.0, 0.9, 1.0);
-    slideBub(fragColor, fragCoord, iResolution.y*size/divvy, vec2(0.11/divvy, 0.16/divvy), pink, 5.0);
-    divvy *= 1.1;
-    divvy *= 1.1;
-    slideBub(fragColor, fragCoord, iResolution.y*size/divvy, vec2(0.1/divvy, 0.14/divvy), blue, 5.0);
-    divvy *= 1.1;
-    divvy *= 1.13;
-    divvy *= 1.1;
-    slideBub(fragColor, fragCoord, iResolution.y*size/divvy, vec2(0.1/divvy, 0.13/divvy), yellow, 5.0);
-    divvy *= 1.1;
-    slideBub(fragColor, fragCoord, iResolution.y*size/divvy, vec2(0.1/divvy, 0.14/divvy), blue, 5.0);
-    divvy *= 1.1;
-    slideBub(fragColor, fragCoord, iResolution.y*size/divvy, vec2(0.1/divvy, 0.15/divvy), lightPink, 5.0);
-    fragColor *= fragColor;
-    fragColor *= fragColor;
-    fragColor = vec4(rgb2hsv(fragColor.xyz), fragColor.w);
-    fragColor.x *= 2.0;
-    fragColor.x -= 0.6;
-    fragColor = vec4(hsv2rgb(fragColor.xyz), fragColor.w);
-}
-"#;
+/// The default background: the repo owner's own Shadertoy shader (see src/shaders/bubbles.glsl).
+const BUBBLES: &str = include_str!("shaders/bubbles.glsl");
 
 // ───────────── multipass (feedback) backgrounds ─────────────
 /// Index of the one multipass background (Shadertoy-style buffers A-D + Image).

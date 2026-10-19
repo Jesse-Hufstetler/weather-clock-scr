@@ -2,7 +2,7 @@
 
 use crate::bg;
 use crate::config::Config;
-use crate::render::{Frame, Renderer};
+use crate::render::{self, Frame, Renderer};
 use crate::weather::{self, Weather};
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
@@ -46,6 +46,8 @@ const ID_PREVIEW: i32 = 116;
 const ID_BRIGHT_V: i32 = 117;
 const ID_MOVE_V: i32 = 118;
 const ID_AUTO: i32 = 122;
+const ID_CONTRAST: i32 = 123;
+const ID_TRANS: i32 = 124;
 /// Posted by the detection thread when `DETECT_RESULT` is ready.
 const WM_DETECTED: u32 = WM_APP + 1;
 
@@ -66,6 +68,9 @@ struct State {
     last_font: String,
     started: Instant,
     credit_bg: usize,
+    /// When the preview started replaying the chosen transition (disappear, then appear again).
+    trans_demo: Option<Instant>,
+    trans_salt: u64,
     detected: Option<weather::Detected>,
 }
 
@@ -73,7 +78,7 @@ const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 418;
+const CONTENT_H: i32 = 478;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -204,6 +209,12 @@ unsafe fn build(panel: HWND) {
     label("Clock movement", y);
     tb(ID_MOVE, ID_MOVE_V, 0, 100, cfg.movement as i32, y);
     y += 28;
+    label("Text contrast", y);
+    combo(ID_CONTRAST, &render::CONTRAST_NAMES, cfg.contrast, y, CBS_DROPDOWNLIST as u32);
+    y += 30;
+    label("Transition", y);
+    combo(ID_TRANS, &render::TRANS_NAMES, cfg.transition, y, CBS_DROPDOWNLIST as u32);
+    y += 30;
     label("Multiple monitors", y);
     combo(ID_MON, &MON_OPTS, cfg.monitors, y, CBS_DROPDOWNLIST as u32);
     y += 30;
@@ -399,6 +410,8 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
     cfg.fps = FPS_OPTS[sel(dlg, ID_FPS).min(2)];
     cfg.brightness = SendMessageW(item(dlg, ID_BRIGHT), TBM_GETPOS_, 0, 0) as u32;
     cfg.movement = SendMessageW(item(dlg, ID_MOVE), TBM_GETPOS_, 0, 0) as u32;
+    cfg.contrast = sel(dlg, ID_CONTRAST).min(render::CONTRAST_NAMES.len() - 1);
+    cfg.transition = sel(dlg, ID_TRANS).min(render::TRANS_NAMES.len() - 1);
     cfg.monitors = sel(dlg, ID_MON);
     cfg.refresh_min = REFRESH_OPTS[sel(dlg, ID_REFRESH).min(3)];
     let font = get_text(item(dlg, ID_FONT)).trim().to_string();
@@ -503,6 +516,14 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
                 ID_ABOUT => show_credits(hwnd),
+                ID_TRANS if (wp >> 16) & 0xFFFF == 1 /* CBN_SELCHANGE */ => {
+                    ST.with(|s| {
+                        let mut s = s.borrow_mut();
+                        let s = s.as_mut().unwrap();
+                        s.trans_demo = Some(Instant::now());
+                        s.trans_salt = s.trans_salt.wrapping_add(1);
+                    });
+                }
                 ID_PREVIEW => {
                     if let Some(cfg) = collect(hwnd, true) {
                         cfg.save();
@@ -656,7 +677,26 @@ unsafe fn tick(dlg: HWND) {
         }
         // "random" cycles through the backgrounds so you can see them all
         let bg = if cfg.background >= bg::NAMES.len() { (t as usize / 8) % bg::NAMES.len() } else { cfg.background };
-        let f = Frame { t, cfg: &cfg, wx: Some(&s.wx), show_text: true, bg, now: st };
+        // picking a transition replays it in the preview: the scene disappears, rests a moment, then appears again
+        let (mut vis, mut tstyle) = (1.0f32, 0usize);
+        if let Some(t0) = s.trans_demo {
+            let el = t0.elapsed().as_secs_f64();
+            let out = render::TRANS_OUT_SECS;
+            let rest = 0.35;
+            if el >= out + rest + render::TRANS_IN_SECS {
+                s.trans_demo = None;
+            } else {
+                tstyle = render::resolve_transition(cfg.transition, s.trans_salt);
+                if el < out {
+                    vis = (1.0 - el / out) as f32;
+                } else if el < out + rest {
+                    vis = 0.0;
+                } else {
+                    vis = ((el - out - rest) / render::TRANS_IN_SECS) as f32;
+                }
+            }
+        }
+        let f = Frame { t, cfg: &cfg, wx: Some(&s.wx), show_text: true, bg, now: st, vis, tstyle };
         r.render(&f, None);
         if s.credit_bg != bg {
             s.credit_bg = bg;
@@ -671,7 +711,7 @@ pub unsafe fn run(owner: HWND) {
     InitCommonControlsEx(&icc);
     let dpi = GetDpiForSystem() as i32;
     let font = CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr());
-    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now(), credit_bg: usize::MAX, detected: None }));
+    ST.with(|s| *s.borrow_mut() = Some(State { cfg: Config::load(), resolved: None, dpi, font, preview: None, wx: weather::load_cache().unwrap_or_else(weather::sample), last_font: String::new(), started: Instant::now(), credit_bg: usize::MAX, detected: None, trans_demo: None, trans_salt: 0 }));
 
     let hinst = GetModuleHandleW(null());
     let class = wide("WxScrConfig");
