@@ -1,17 +1,20 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const NAMES: [&str; 6] = [
+pub const NAMES: [&str; 9] = [
     "Original bubbles (dash2)",
     "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
     "Perhaps a screensaver (pirandello, Shadertoy)",
     "Hex crystal (ChunderFPV, Shadertoy)",
+    "Mac flurry (ufffd, Shadertoy)",
+    "Spiral journey (ChunderFPV, Shadertoy)",
+    "Screensaver squares (julianlumia, Shadertoy)",
 ];
 
 /// Stable ids stored in config.json, so adding or reordering backgrounds never changes what a saved choice means.
-pub const IDS: [&str; 6] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal"];
+pub const IDS: [&str; 9] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal", "mac_flurry", "spiral_journey", "screensaver_squares"];
 const RANDOM_ID: &str = "random";
 
 /// Config id -> index into `NAMES`; "random" maps to `NAMES.len()`, unknown ids fall back to the first background.
@@ -28,7 +31,7 @@ pub fn index_to_id(i: usize) -> &'static str {
 }
 
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
-pub const TIME_SCALE: [f32; 6] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0];
+pub const TIME_SCALE: [f32; 9] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0];
 
 /// Who made each background and under what terms (shown in the settings window).
 pub struct Credit {
@@ -42,7 +45,7 @@ pub struct Credit {
 
 const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
 
-pub const CREDITS: [Credit; 6] = [
+pub const CREDITS: [Credit; 9] = [
     Credit {
         author: "Jesse Hufstetler (ported from dash2.html)",
         license: "Own work",
@@ -85,6 +88,27 @@ pub const CREDITS: [Credit; 6] = [
         retrieved: "2026-10-18",
         changes: "Unmodified code (iMouse supplied as constant 0, so it auto-rotates)",
     },
+    Credit {
+        author: "ufffd (simplex noise by Ian McEwan / Ashima Arts, MIT)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/lX2SDt",
+        retrieved: "2026-10-18",
+        changes: "Multipass port: simulation at 360px height, stepped at 60 Hz; buffers A-C share one file; O-=O -> O=vec4(0)",
+    },
+    Credit {
+        author: "ChunderFPV",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/mssSWr",
+        retrieved: "2026-10-18",
+        changes: "Multipass port; mouse counter overlay omitted; hosted background texture replaced by generated noise",
+    },
+    Credit {
+        author: "julianlumia (after the starfield tutorial by BigWings / The Art of Code)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/Wdcyz7",
+        retrieved: "2026-10-18",
+        changes: "Renamed one local variable (star -> st) that shadowed a function",
+    },
 ];
 
 /// Multi-line credit text for the settings window (\r\n for Win32 static controls).
@@ -122,6 +146,8 @@ pub fn about_text() -> String {
 pub const HEADER: &str = "#version 120
 uniform vec2 wx_res;
 uniform float iTime;
+uniform sampler2D iChannel0, iChannel1, iChannel2, iChannel3;
+#define texture texture2D
 #define iResolution vec3(wx_res, 1.0)
 #define iMouse vec4(0.0)
 #define tanh wx_tanh
@@ -136,17 +162,23 @@ vec3 wx_round(vec3 x){ return floor(x + 0.5); }
 pub const FOOTER: &str = "\nvoid main(){ vec4 c; mainImage(c, gl_FragCoord.xy); gl_FragColor = c; }\n";
 
 pub fn source(i: usize) -> String {
-    format!("{HEADER}{}{FOOTER}", SHADERS[i.min(SHADERS.len() - 1)])
+    // multipass backgrounds are built from their passes (see `multi`); a plain fallback keeps this total
+    format!("{HEADER}{}{FOOTER}", single(i).unwrap_or(BUBBLES))
 }
 
-pub const SHADERS: [&str; 6] = [
-    BUBBLES,
-    include_str!("shaders/random_gallery.glsl"),
-    include_str!("shaders/frozen_flame.glsl"),
-    include_str!("shaders/zippy_zaps.glsl"),
-    include_str!("shaders/perhaps_a_screensaver.glsl"),
-    include_str!("shaders/hex_crystal.glsl"),
-];
+/// Single-pass shader source per background index (multipass ones are built from their passes by `multi`).
+fn single(i: usize) -> Option<&'static str> {
+    Some(match i {
+        0 => BUBBLES,
+        1 => include_str!("shaders/random_gallery.glsl"),
+        2 => include_str!("shaders/frozen_flame.glsl"),
+        3 => include_str!("shaders/zippy_zaps.glsl"),
+        4 => include_str!("shaders/perhaps_a_screensaver.glsl"),
+        5 => include_str!("shaders/hex_crystal.glsl"),
+        8 => include_str!("shaders/screensaver_squares.glsl"),
+        _ => return None,
+    })
+}
 
 /// Straight port of the shader in dash2.html (dither moved to the final blit).
 const BUBBLES: &str = r#"
@@ -200,3 +232,76 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord){
     fragColor = vec4(hsv2rgb(fragColor.xyz), fragColor.w);
 }
 "#;
+
+// ───────────── multipass (feedback) backgrounds ─────────────
+/// Index of the one multipass background (Shadertoy-style buffers A-D + Image).
+pub const FLURRY: usize = 6;
+
+pub const SPIRAL: usize = 7;
+
+pub fn is_multi(i: usize) -> bool {
+    i == FLURRY || i == SPIRAL
+}
+
+/// What an `iChannelN` reads: nothing, or the latest output of a buffer (`mip` = sampled through its mip chain).
+#[derive(Clone, Copy)]
+pub enum Src {
+    None,
+    /// A generated tileable colour-noise texture (stands in for Shadertoy-hosted images).
+    Noise,
+    Buf(usize, bool),
+}
+
+pub struct Pass {
+    pub code: String,
+    pub inputs: [Src; 4],
+}
+
+pub struct Multi {
+    pub common: &'static str,
+    pub buffers: Vec<Pass>,
+    pub image: Pass,
+    /// The simulation runs at this fixed height (width follows the aspect). These shaders step in whole pixels,
+    /// so their look depends on resolution; ~Shadertoy's preview size keeps the original look and the GPU cost low.
+    pub sim_height: i32,
+}
+
+pub fn multi(i: usize) -> Option<Multi> {
+    match i {
+        FLURRY => Some(flurry()),
+        SPIRAL => Some(spiral()),
+        _ => None,
+    }
+}
+
+fn spiral() -> Multi {
+    let a = Pass {
+        code: include_str!("shaders/spiral_journey/buffer_a.glsl").to_string(),
+        inputs: [Src::Buf(0, true), Src::Noise, Src::None, Src::None],
+    };
+    let image = Pass { code: include_str!("shaders/spiral_journey/image.glsl").to_string(), inputs: [Src::Buf(0, true), Src::None, Src::None, Src::None] };
+    Multi { common: include_str!("shaders/spiral_journey/common.glsl"), buffers: vec![a], image, sim_height: 720 }
+}
+
+fn flurry() -> Multi {
+    let tails = |n: &str| Pass {
+        code: format!("#define TAIL_OFFSET {n}\n{}", include_str!("shaders/mac_flurry/tails.glsl")),
+        inputs: [Src::None; 4],
+    };
+    let mut a = tails("1.");
+    let mut b = tails("10.");
+    let mut c = tails("20.");
+    a.inputs[0] = Src::Buf(0, true); // A reads its own previous frame, mip-filtered
+    b.inputs[0] = Src::Buf(1, false);
+    c.inputs[0] = Src::Buf(2, false);
+    let d = Pass {
+        code: include_str!("shaders/mac_flurry/buffer_d.glsl").to_string(),
+        inputs: [Src::Buf(0, false), Src::Buf(1, false), Src::Buf(2, false), Src::Buf(3, true)],
+    };
+    let image = Pass { code: include_str!("shaders/mac_flurry/image.glsl").to_string(), inputs: [Src::Buf(3, false), Src::None, Src::None, Src::None] };
+    Multi { common: include_str!("shaders/mac_flurry/common.glsl"), buffers: vec![a, b, c, d], image, sim_height: 360 }
+}
+
+pub fn pass_source(common: &str, code: &str) -> String {
+    format!("{HEADER}{common}\n{code}{FOOTER}")
+}

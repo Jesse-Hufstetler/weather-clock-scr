@@ -15,6 +15,12 @@ use windows_sys::Win32::Graphics::OpenGL::*;
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
 const GL_LUMINANCE: u32 = 0x1909;
+const GL_RGBA32F: i32 = 0x8814;
+const GL_FLOAT_: u32 = 0x1406;
+const GL_REPEAT: u32 = 0x2901;
+const NOISE_N: usize = 256;
+/// Multipass simulations advance at this fixed rate, whatever the display's refresh rate is.
+const SIM_STEP: f64 = 1.0 / 60.0;
 
 pub struct Frame<'a> {
     pub t: f64,
@@ -47,6 +53,20 @@ struct Locs {
     text_sh: i32,
 }
 
+/// A Shadertoy-style multipass background: up to four buffers (each a ping-pong pair of float textures) + Image.
+struct MultiState {
+    spec: bg::Multi,
+    progs: Vec<u32>, // one per buffer, then Image last
+    tex: Vec<[u32; 2]>,
+    /// Which texture of each pair holds the buffer's latest finished frame.
+    read: Vec<usize>,
+    mip: Vec<bool>,
+    noise: u32,
+    sw: i32,
+    sh: i32,
+    last_step: f64,
+}
+
 pub struct Renderer {
     /// True when the driver honoured a swap interval of 1 (so SwapBuffers paces frames to the display).
     pub vsync: bool,
@@ -67,6 +87,8 @@ pub struct Renderer {
     rast: Rasterizer,
     runs: [Run; 8],
     keys: [String; 8],
+    multi: Option<MultiState>,
+    sim_fbo: u32,
 }
 
 const BLIT_FS: &str = "#version 120
@@ -133,7 +155,8 @@ impl Renderer {
             gl: g,
             w,
             h,
-            bg: bg_idx,
+            // multipass backgrounds are built on the first frame (render() sees the index differ)
+            bg: if bg::is_multi(bg_idx) { usize::MAX } else { bg_idx },
             bg_prog,
             blit_prog,
             text_prog,
@@ -145,6 +168,8 @@ impl Renderer {
             rast: Rasterizer::new(&cfg.font),
             runs: [Run::default(); 8],
             keys: Default::default(),
+            multi: None,
+            sim_fbo: 0,
         };
         r.ensure_fbo(w, h);
         Ok(r)
@@ -235,25 +260,188 @@ impl Renderer {
         self.keys[slot] = key;
     }
 
+    /// Switch background: single-pass shaders swap one program; multipass ones build their buffers.
+    unsafe fn set_background(&mut self, idx: usize, tw: i32, th: i32) {
+        self.free_multi();
+        if let Some(spec) = bg::multi(idx) {
+            match self.build_multi(spec, tw, th) {
+                Ok(m) => {
+                    self.multi = Some(m);
+                }
+                Err(e) => {
+                    crate::log(&format!("multipass background failed: {e}"));
+                    // fall back to the first background so the screen is never blank
+                    self.bg_prog = gl::program(&self.gl, &bg::source(0)).unwrap_or(self.bg_prog);
+                    self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
+                    self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
+                }
+            }
+            self.bg = idx;
+            return;
+        }
+        self.bg_prog = gl::program(&self.gl, &bg::source(idx)).unwrap_or(self.bg_prog);
+        self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
+        self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
+        self.bg = idx;
+    }
+
+    unsafe fn build_multi(&mut self, spec: bg::Multi, tw: i32, th: i32) -> Result<MultiState, String> {
+        let n = spec.buffers.len();
+        let mut progs = Vec::with_capacity(n + 1);
+        for (k, p) in spec.buffers.iter().enumerate() {
+            progs.push(gl::program(&self.gl, &bg::pass_source(spec.common, &p.code)).map_err(|e| format!("buffer {k}: {e}"))?);
+        }
+        progs.push(gl::program(&self.gl, &bg::pass_source(spec.common, &spec.image.code)).map_err(|e| format!("image: {e}"))?);
+        let sh = spec.sim_height;
+        let sw = ((sh as f32 * tw as f32 / th.max(1) as f32).round() as i32).max(16);
+        // which buffers are read through their mip chain by some pass, and whether anything wants the noise texture
+        let mut mip = vec![false; n];
+        let mut wants_noise = false;
+        for p in spec.buffers.iter().chain(std::iter::once(&spec.image)) {
+            for s in p.inputs {
+                match s {
+                    bg::Src::Buf(b, true) => mip[b] = true,
+                    bg::Src::Noise => wants_noise = true,
+                    _ => {}
+                }
+            }
+        }
+        let mut noise = 0u32;
+        if wants_noise {
+            glGenTextures(1, &mut noise);
+            glBindTexture(GL_TEXTURE_2D, noise);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB as i32, NOISE_N as i32, NOISE_N as i32, 0, GL_RGB, GL_UNSIGNED_BYTE, noise_texture().as_ptr() as *const _);
+            (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl::LINEAR_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT as i32);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT as i32);
+        }
+        let mut tex = vec![[0u32; 2]; n];
+        if self.sim_fbo == 0 {
+            (self.gl.GenFramebuffers)(1, &mut self.sim_fbo);
+        }
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.sim_fbo);
+        for k in 0..n {
+            for j in 0..2 {
+                glGenTextures(1, &mut tex[k][j]);
+                glBindTexture(GL_TEXTURE_2D, tex[k][j]);
+                // 32-bit float: feedback trails multiply by <1 every step, which half-float rounding would stall
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, sw, sh, 0, GL_RGBA, GL_FLOAT_, std::ptr::null());
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, if mip[k] { gl::LINEAR_MIPMAP_LINEAR } else { GL_LINEAR as i32 });
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+                // start from black
+                (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[k][j], 0);
+                glViewport(0, 0, sw, sh);
+                glClearColor(0.0, 0.0, 0.0, 0.0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                if mip[k] {
+                    (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
+                }
+            }
+        }
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
+        Ok(MultiState { spec, progs, tex, read: vec![0; n], mip, noise, sw, sh, last_step: f64::NEG_INFINITY })
+    }
+
+    unsafe fn free_multi(&mut self) {
+        if let Some(m) = self.multi.take() {
+            for t in &m.tex {
+                glDeleteTextures(2, t.as_ptr());
+            }
+            if m.noise != 0 {
+                glDeleteTextures(1, &m.noise);
+            }
+            for p in &m.progs {
+                (self.gl.DeleteProgram)(*p);
+            }
+        }
+    }
+
+    unsafe fn bind_inputs(&self, m: &MultiState, inputs: &[bg::Src; 4], prog: u32) {
+        for (n, s) in inputs.iter().enumerate() {
+            let tex = match s {
+                bg::Src::Buf(b, _) => m.tex[*b][m.read[*b]],
+                bg::Src::Noise => m.noise,
+                bg::Src::None => continue,
+            };
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + n as u32);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            (self.gl.Uniform1i)(gl::uloc(&self.gl, prog, &format!("iChannel{n}")), n as i32);
+        }
+        (self.gl.ActiveTexture)(gl::TEXTURE0);
+    }
+
+    /// Advance the simulation (fixed 60 Hz steps) and draw the Image pass into the window-resolution buffer.
+    unsafe fn render_multi(&mut self, t: f64, sim_t: f32, tw: i32, th: i32) {
+        // keep the simulation's aspect in step with the window (the settings preview resizes)
+        let (cur_sw, cur_sh) = match self.multi.as_ref() {
+            Some(m) => (m.sw, m.sh),
+            None => return,
+        };
+        let want_sw = ((cur_sh as f32 * tw as f32 / th.max(1) as f32).round() as i32).max(16);
+        if want_sw != cur_sw {
+            let idx = self.bg;
+            self.set_background(idx, tw, th);
+        }
+        let Some(mut m) = self.multi.take() else { return };
+        let n = m.spec.buffers.len();
+        if t - m.last_step >= SIM_STEP - 0.001 || t < m.last_step {
+            m.last_step = t;
+            (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.sim_fbo);
+            glViewport(0, 0, m.sw, m.sh);
+            for k in 0..n {
+                let write = 1 - m.read[k];
+                (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, m.tex[k][write], 0);
+                let prog = m.progs[k];
+                (self.gl.UseProgram)(prog);
+                (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), m.sw as f32, m.sh as f32);
+                (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
+                self.bind_inputs(&m, &m.spec.buffers[k].inputs, prog);
+                Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+                m.read[k] = write;
+                if m.mip[k] {
+                    glBindTexture(GL_TEXTURE_2D, m.tex[k][write]);
+                    (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
+                }
+            }
+        }
+        // Image pass -> the same offscreen buffer single-pass backgrounds use (then blit + text as usual)
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
+        glViewport(0, 0, self.fw, self.fh);
+        let prog = m.progs[n];
+        (self.gl.UseProgram)(prog);
+        (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), self.fw as f32, self.fh as f32);
+        (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
+        self.bind_inputs(&m, &m.spec.image.inputs, prog);
+        Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+        self.multi = Some(m);
+    }
+
     /// Draw one frame. `target` = (fbo, w, h) for offscreen rendering, None for the window.
     pub unsafe fn render(&mut self, f: &Frame, target: Option<(u32, i32, i32)>) {
         wglMakeCurrent(self.hdc, self.rc);
         let (tw, th) = target.map_or((self.w, self.h), |t| (t.1, t.2));
         self.ensure_fbo(tw, th);
         if f.bg != self.bg {
-            self.bg_prog = gl::program(&self.gl, &bg::source(f.bg)).unwrap_or(self.bg_prog);
-            self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
-            self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
-            self.bg = f.bg;
+            self.set_background(f.bg, tw, th);
         }
         glDisable(GL_BLEND);
         // 1. background -> offscreen
-        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
-        glViewport(0, 0, self.fw, self.fh);
-        (self.gl.UseProgram)(self.bg_prog);
-        (self.gl.Uniform2f)(self.loc.bg_res, self.fw as f32, self.fh as f32);
-        (self.gl.Uniform1f)(self.loc.bg_time, (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)]);
-        Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+        let sim_t = (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)];
+        if self.multi.is_some() {
+            self.render_multi(f.t, sim_t, tw, th);
+        } else {
+            (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
+            glViewport(0, 0, self.fw, self.fh);
+            (self.gl.UseProgram)(self.bg_prog);
+            (self.gl.Uniform2f)(self.loc.bg_res, self.fw as f32, self.fh as f32);
+            (self.gl.Uniform1f)(self.loc.bg_time, sim_t);
+            Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+        }
         // 2. blit to target
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, target.map_or(0, |t| t.0));
         glViewport(0, 0, tw, th);
@@ -376,6 +564,13 @@ impl Renderer {
         (self.gl.GenFramebuffers)(1, &mut fbo);
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, fbo);
         (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        if bg::is_multi(f.bg) {
+            // feedback simulations need history: run ~4 s of steps first
+            for k in 0..240 {
+                let warm = Frame { t: f.t - (240 - k) as f64 / 60.0, cfg: f.cfg, wx: f.wx, show_text: false, bg: f.bg, now: f.now };
+                self.render(&warm, Some((fbo, w, h)));
+            }
+        }
         self.render(f, Some((fbo, w, h)));
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, fbo);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -458,4 +653,37 @@ fn blur_lowres(src: &[u8], w: usize, h: usize, f: usize, radius: usize) -> (Vec<
         }
     }
     (a.iter().map(|v| (v * 255.0).clamp(0.0, 255.0) as u8).collect(), sw, sh)
+}
+
+/// Tileable colour value-noise (RGB8, NOISE_N squared): stands in for the hosted textures some Shadertoy shaders sample.
+fn noise_texture() -> Vec<u8> {
+    fn hash(x: u32, y: u32, c: u32, o: u32) -> f32 {
+        let mut h = x.wrapping_mul(374761393) ^ y.wrapping_mul(668265263) ^ c.wrapping_mul(2147483629) ^ o.wrapping_mul(1274126177);
+        h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+        h ^= h >> 16;
+        (h & 0xFFFF) as f32 / 65535.0
+    }
+    let n = NOISE_N;
+    let mut acc = vec![0f32; n * n * 3];
+    let mut norm = 0.0;
+    for oct in 0..5u32 {
+        let period = 4u32 << oct;
+        let amp = 0.55f32.powi(oct as i32);
+        norm += amp;
+        for c in 0..3u32 {
+            for y in 0..n {
+                for x in 0..n {
+                    let (fx, fy) = (x as f32 * period as f32 / n as f32, y as f32 * period as f32 / n as f32);
+                    let (x0, y0) = (fx.floor() as u32, fy.floor() as u32);
+                    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+                    let (sx, sy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
+                    let v = |dx: u32, dy: u32| hash((x0 + dx) % period, (y0 + dy) % period, c, oct);
+                    let top = v(0, 0) + (v(1, 0) - v(0, 0)) * sx;
+                    let bot = v(0, 1) + (v(1, 1) - v(0, 1)) * sx;
+                    acc[(y * n + x) * 3 + c as usize] += amp * (top + (bot - top) * sy);
+                }
+            }
+        }
+    }
+    acc.iter().map(|v| ((((v / norm) - 0.5) * 1.5 + 0.5).clamp(0.0, 1.0) * 255.0) as u8).collect()
 }

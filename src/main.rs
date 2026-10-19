@@ -372,6 +372,8 @@ enum Mode {
 }
 
 fn main() {
+    // a screensaver has no console: leave a trace in log.txt if anything panics
+    std::panic::set_hook(Box::new(|info| log(&format!("panic: {info}"))));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let first = args.first().map(|s| s.to_lowercase()).unwrap_or_default();
     let (flag, inline) = match first.split_once(':') {

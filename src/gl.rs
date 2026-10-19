@@ -61,6 +61,7 @@ gl_fns! {
     GetProgramInfoLog(u32, i32, *mut i32, *mut i8);
     UseProgram(u32);
     DeleteShader(u32);
+    DeleteProgram(u32);
     GetUniformLocation(u32, *const i8) -> i32;
     Uniform1f(i32, f32);
     Uniform2f(i32, f32, f32);
