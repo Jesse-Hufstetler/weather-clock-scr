@@ -35,6 +35,9 @@ pub struct Config {
     pub font: String,
     /// How the text is kept readable over busy backgrounds: 0 soft shadow, 1 black halo, 2 black outline.
     pub contrast: usize,
+    /// Percent of the screen resolution the background is rendered at (100, 75 or 50); it is scaled up to the screen, the
+    /// text stays sharp. Lower values make heavy backgrounds run smoothly on slower GPUs.
+    pub render_scale: u32,
     /// Fade in / out of the screensaver: index into render::TRANS_NAMES (last = random).
     pub transition: usize,
 }
@@ -61,6 +64,7 @@ impl Default for Config {
             refresh_min: 20,
             font: String::new(),
             contrast: 0,
+            render_scale: 100,
             transition: 2,
         }
     }
@@ -105,6 +109,7 @@ impl Config {
         c.monitors = (nu("monitors", c.monitors as u64) as usize).min(2);
         c.refresh_min = nu("refresh_min", c.refresh_min as u64).clamp(5, 180) as u32;
         c.font = st("font", "");
+        c.render_scale = match nu("render_scale", 100) { 75 => 75, 50 => 50, _ => 100 };
         c.contrast = (nu("contrast", c.contrast as u64) as usize).min(crate::render::CONTRAST_NAMES.len() - 1);
         c.transition = match &v["transition"] {
             Value::String(id) => crate::render::TRANS_IDS.iter().position(|x| x == id).unwrap_or(c.transition),
@@ -123,7 +128,7 @@ impl Config {
             "details": self.details, "background": crate::bg::index_to_id(self.background),
             "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
-            "contrast": self.contrast, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),
+            "contrast": self.contrast, "render_scale": self.render_scale, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),
         });
         let _ = std::fs::write(path(), serde_json::to_string_pretty(&v).unwrap_or_default());
     }

@@ -117,24 +117,22 @@ fn quit() {
     unsafe { PostQuitMessage(0) };
 }
 
-// KNOWN ISSUES / NOTES ON THE START AND END OF A RUN (transitions + flashes)
+// NOTES ON THE START AND END OF A RUN (transitions + flashes)
 //
-// * A faint black flash is still visible at start/stop, roughly along the top of the taskbar. What has been ruled out:
-//   the startup screenshot has no dark row there (dumped and inspected), and the taskbar window's own pixels do not
-//   change. What was fixed: the window used to get a taskbar button that appeared and vanished (the taskbar then
-//   re-laid itself out and flashed), so it is now WS_EX_TOOLWINDOW. What remains is probably the shell: it keeps the
-//   taskbar above our window for ~0.3 s after we appear, then drops it from topmost, and promotes it again ~0.1 s
-//   after we are destroyed. Untested ideas: keep the window off the taskbar strip until the shell has demoted the
-//   taskbar, or fade the window with layered alpha instead of moving it on-screen.
-// * The window is created far off-screen and moved onto the monitor after two frames have been presented, because
-//   showing a fresh GL window lets the compositor display its blank (black) surface for a frame or two.
-// * The fade BACK to the desktop blends with the screenshot taken at start-up, so anything that changed on screen in
-//   the meantime (a notification, a video) pops at the very end. An earlier version re-captured the screen behind the
-//   saver at exit using SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) and gave better results in principle, but
-//   toggling the affinity was a suspect for the black flash and was removed. Worth revisiting (e.g. capture with
-//   Windows.Graphics.Capture or DXGI desktop duplication, which can exclude our window without touching it).
-// * Screen capture with GDI (CopyFromScreen, BitBlt) does not reliably show this window, so the transitions were
-//   checked frame by frame with /snap (WXSCR_TRANS=<style>:<visibility>) and not by recording the real screen.
+// * Fading is done by the compositor: with a transition enabled the window is WS_EX_LAYERED and the renderer sets its
+//   whole-window alpha (SetLayeredWindowAttributes / LWA_ALPHA) from the transition progress, so the real desktop shows
+//   through live, in both directions. No screenshot of the desktop is taken. The window is created fully transparent
+//   and is only made visible by the first alpha > 0, so there is no black first frame. Per-pixel effects (wipes, irises)
+//   are not possible this way and were dropped; blur and zoom only affect what we render, not the desktop.
+// * The window is 1 pixel shorter than the monitor: that avoids both the compositor bypass that ignores the alpha (exact
+//   size) and the shell's full-screen reaction that flashes a black bar on the taskbar (see where the window is created).
+// * The window is a tool window (WS_EX_TOOLWINDOW) so no taskbar button appears and disappears; that button used to make
+//   the taskbar re-lay itself out and flash.
+// * Screen capture (GDI, desktop duplication and Windows.Graphics.Capture were all tried) cannot see this window while
+//   it is full-screen: it is presented outside the compositor's capture path. To check what the user sees, run with the
+//   env var WXSCR_SMALL=1 (a 1000x560 window): a capture tool then sees it, and the alpha fade (real desktop blending
+//   with the scene, no black dip at either end) was verified that way with WGC on this machine. Frames of the effects
+//   alone can also be rendered with /snap (WXSCR_TRANS=<style>:<visibility>).
 
 /// Input arrived: start the fade-out if there is one (the main loop quits when it finishes), else quit now.
 fn leave() {
@@ -208,8 +206,6 @@ unsafe fn register_class() -> (HINSTANCE, Vec<u16>) {
 }
 
 struct Win {
-    hwnd: HWND,
-    rect: RECT,
     renderer: Option<Renderer>,
     show_text: bool,
 }
@@ -227,40 +223,6 @@ unsafe extern "system" fn enum_mon(hm: HMONITOR, _: HDC, _: *mut RECT, lp: LPARA
         v.push(Mon { rect: mi.rcMonitor, primary: mi.dwFlags & 1 != 0 });
     }
     1
-}
-
-/// Screenshot of a screen rectangle as bottom-up BGRA (what OpenGL wants), or None if GDI refuses.
-unsafe fn capture(rect: &RECT) -> Option<(i32, i32, Vec<u8>)> {
-    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-    if w <= 0 || h <= 0 {
-        return None;
-    }
-    let sdc = GetDC(null_mut());
-    let mdc = CreateCompatibleDC(sdc);
-    let mut bi: BITMAPINFO = std::mem::zeroed();
-    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-    bi.bmiHeader.biWidth = w;
-    bi.bmiHeader.biHeight = h; // positive = bottom-up, row 0 at the bottom like an OpenGL texture
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    let mut bits: *mut core::ffi::c_void = null_mut();
-    let bmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-    let mut out = None;
-    if !bmp.is_null() && !bits.is_null() {
-        let old = SelectObject(mdc, bmp as _);
-        if BitBlt(mdc, 0, 0, w, h, sdc, rect.left, rect.top, SRCCOPY | CAPTUREBLT) != 0 {
-            GdiFlush();
-            out = Some((w, h, std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec()));
-        }
-        SelectObject(mdc, old);
-    }
-    if !bmp.is_null() {
-        DeleteObject(bmp as _);
-    }
-    DeleteDC(mdc);
-    ReleaseDC(null_mut(), sdc);
-    out
 }
 
 fn pick_bg(cfg: &Config) -> usize {
@@ -300,22 +262,35 @@ unsafe fn run(mode: Mode, cfg: Config) {
                 // the test run covers the primary monitor at full size (quits on mouse move, key or click like the real saver), topmost
                 mons.retain(|m| m.primary);
             }
-            // what is on screen right now: the screensaver will dissolve out of it
-            let shots: Vec<Option<(i32, i32, Vec<u8>)>> = if style_in != 0 { mons.iter().map(|m| capture(&m.rect)).collect() } else { Vec::new() };
-            for (mi, m) in mons.iter().enumerate() {
-                let (w, h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
+            for m in mons.iter() {
+                let (mut w, mut h) = (m.rect.right - m.rect.left, m.rect.bottom - m.rect.top);
+                let (mut wl, mut wt) = (m.rect.left, m.rect.top);
+                // dev switch: a 1000x560 window instead of full-screen (see the notes above: capture tools cannot see full-screen ones)
+                if std::env::var_os("WXSCR_SMALL").is_some() {
+                    (wl, wt, w, h) = (400, 300, 1000, 560);
+                }
+                // One pixel short of the full monitor height, on purpose (the bottom pixel row shows what is behind us):
+                //  * a window that covers the whole monitor makes the shell react (it demotes and redraws the taskbar), which
+                //    showed up as a ~10 px black bar along the top of the taskbar for ~0.4 s at start and at exit; measured
+                //    frame by frame with Windows.Graphics.Capture, sizes of monitor+0/+1/+2 all showed it, monitor-1 in
+                //    either dimension never did, and the window still covers the taskbar;
+                //  * a window that exactly matches the monitor is also presented outside the compositor, which ignores its
+                //    alpha (no fade), so the exact size was no option for transitions either.
+                h -= 1;
                 // topmost (also for the fullscreen test, so it can not end up behind another window) and a tool window: no
                 // taskbar button appearing and disappearing, which made the taskbar re-lay itself out and flash
-                let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-                let style = WS_POPUP | WS_VISIBLE;
-                // fading in: the window is created far off-screen and moved onto the monitor once two frames have been
-                // presented, so the compositor never shows its blank initial surface (a black flash)
-                let (wx0, wy0) = if style_in != 0 { (-32000, -32000) } else { (m.rect.left, m.rect.top) };
-                let hwnd = CreateWindowExW(ex, class.as_ptr(), title.as_ptr(), style, wx0, wy0, w, h, null_mut(), null_mut(), hinst, null());
+                let mut ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+                if style_in != 0 {
+                    ex |= WS_EX_LAYERED; // fade in/out through the window's alpha, so the real desktop shows through
+                }
+                let hwnd = CreateWindowExW(ex, class.as_ptr(), title.as_ptr(), WS_POPUP | WS_VISIBLE, wl, wt, w, h, null_mut(), null_mut(), hinst, null());
                 if hwnd.is_null() {
                     continue;
                 }
-                if matches!(mode, Mode::Windowed) && style_in == 0 {
+                if style_in != 0 {
+                    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA); // invisible until the first frame has been drawn
+                }
+                if matches!(mode, Mode::Windowed) {
                     SetForegroundWindow(hwnd); // so Esc reaches it
                 }
                 let black = cfg.monitors == 2 && !m.primary;
@@ -326,19 +301,14 @@ unsafe fn run(mode: Mode, cfg: Config) {
                     let mut rc: RECT = std::mem::zeroed();
                     GetClientRect(hwnd, &mut rc);
                     match Renderer::new(hwnd, rc.right.max(1), rc.bottom.max(1), &cfg, bg_idx) {
-                        Ok(mut r) => {
-                            if let Some(Some((sw, sh, data))) = shots.get(mi) {
-                                r.set_outside(*sw, *sh, data);
-                            }
-                            Some(r)
-                        }
+                        Ok(r) => Some(r),
                         Err(e) => {
                             log(&format!("renderer: {e}"));
                             None
                         }
                     }
                 };
-                wins.push(Win { hwnd, rect: m.rect, renderer, show_text });
+                wins.push(Win { renderer, show_text });
             }
             if matches!(mode, Mode::Saver) {
                 ShowCursor(0);
@@ -350,7 +320,7 @@ unsafe fn run(mode: Mode, cfg: Config) {
             GetClientRect(parent, &mut rc);
             let hwnd = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_CHILD | WS_VISIBLE, 0, 0, rc.right, rc.bottom, parent, null_mut(), hinst, null());
             if let Ok(r) = Renderer::new(hwnd, rc.right.max(1), rc.bottom.max(1), &cfg, bg_idx) {
-                wins.push(Win { hwnd, rect: rc, renderer: Some(r), show_text: true });
+                wins.push(Win { renderer: Some(r), show_text: true });
             }
         }
     }
@@ -395,7 +365,7 @@ unsafe fn run(mode: Mode, cfg: Config) {
             GetLocalTime(&mut st);
             let guard = WEATHER.lock().unwrap();
             if exit_t0.is_none() && EXIT_START.load(Ordering::Relaxed) != 0 {
-                exit_t0 = Some(Instant::now()); // fade back into the screenshot taken at start
+                exit_t0 = Some(Instant::now());
             }
             let leaving = exit_t0.is_some();
             let vis_in = shown_at.map_or(0.0, |t| (t.elapsed().as_secs_f64() / render::TRANS_IN_SECS).min(1.0));
@@ -409,28 +379,14 @@ unsafe fn run(mode: Mode, cfg: Config) {
             }
             drop(guard);
             if shown_at.is_none() {
-                if style_in != 0 {
-                    // frame 1 (the old screen, untouched) is presented; present it once more, then slide the window onto the monitor
-                    if debug {
-                        log(&format!("first frame drawn after {:?}; moving window into place", start.elapsed()));
-                    }
-                    let guard = WEATHER.lock().unwrap();
-                    for w in wins.iter_mut() {
-                        if let Some(r) = w.renderer.as_mut() {
-                            let f = Frame { t: t_offset + start.elapsed().as_secs_f64(), cfg: &cfg, wx: guard.as_ref(), show_text: w.show_text, bg: bg_idx, now: st, vis: 0.0, tstyle: style_in };
-                            r.render(&f, None);
-                        }
-                    }
-                    drop(guard);
-                    for w in wins.iter() {
-                        SetWindowPos(w.hwnd, HWND_TOPMOST, w.rect.left, w.rect.top, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
-                        SetForegroundWindow(w.hwnd); // so key presses reach it
-                    }
+                // frame 1 is drawn (at alpha 0): the fade-in starts from here
+                if debug {
+                    log(&format!("first frame drawn after {:?}", start.elapsed()));
                 }
                 shown_at = Some(Instant::now());
             }
             if leaving && vis_out <= 0.0 {
-                return; // faded to black
+                return; // fully faded out
             }
             if debug {
                 frames += 1;
@@ -450,6 +406,27 @@ unsafe fn run(mode: Mode, cfg: Config) {
             let ms = (next - now).as_millis() as u32;
             MsgWaitForMultipleObjects(0, null(), 0, ms.max(1), QS_ALLINPUT);
         }
+    }
+}
+
+// ───────────── developer benchmark: /bench [w h [frames [only]]] ─────────────
+/// Renders every background offscreen at w x h and logs the average ms per frame (and the fps that implies).
+unsafe fn bench(w: i32, h: i32, frames: u32, only: Option<usize>) {
+    let (hinst, class) = register_class();
+    let hwnd = CreateWindowExW(0, class.as_ptr(), wide("bench").as_ptr(), WS_POPUP, 0, 0, 64, 64, null_mut(), null_mut(), hinst, null());
+    let cfg = Config::load();
+    let mut r = match Renderer::new(hwnd, w, h, &cfg, 0) {
+        Ok(r) => r,
+        Err(e) => return log(&format!("bench: {e}")),
+    };
+    let wx = weather::load_cache().unwrap_or_else(weather::sample);
+    log(&format!("bench {w}x{h}, {frames} frames each"));
+    for i in 0..bg::NAMES.len() {
+        if only.map_or(false, |o| o != i) {
+            continue;
+        }
+        let ms = r.bench(&cfg, &wx, i, w, h, frames);
+        log(&format!("bench {:>2} {:<46} {:7.2} ms  {:6.1} fps", i, bg::NAMES[i], ms, 1000.0 / ms));
     }
 }
 
@@ -544,6 +521,11 @@ fn main() {
                 Ok(d) => log(&format!("detect: {} | text={:?} | ({:.4}, {:.4}) | via {}", d.name, d.text, d.lat, d.lon, d.source)),
                 Err(e) => log(&format!("detect failed: {e}")),
             },
+            "bench" => {
+                let a = |i: usize, d: i32| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+                let only = args.get(4).and_then(|s| s.parse().ok());
+                bench(a(1, 1920), a(2, 1080), a(3, 60) as u32, only);
+            }
             "snap" => {
                 let a = |i: usize, d: i32| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
                 let only = args.get(4).and_then(|s| s.parse().ok());

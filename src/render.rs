@@ -13,6 +13,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use windows_sys::Win32::Foundation::{HWND, SYSTEMTIME};
 use windows_sys::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows_sys::Win32::Graphics::OpenGL::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongW, SetLayeredWindowAttributes, GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED};
 
 const GL_PACK_ALIGNMENT: u32 = 0x0D05;
 const GL_UNPACK_ALIGNMENT: u32 = 0x0CF5;
@@ -23,6 +24,12 @@ const GL_REPEAT: u32 = 0x2901;
 const NOISE_N: usize = 256;
 /// Multipass simulations advance at this fixed rate, whatever the display's refresh rate is.
 const SIM_STEP: f64 = 1.0 / 60.0;
+
+/// Smootherstep easing used for every transition (the shader has the same function).
+pub fn ease(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * x * (x * (x * 6.0 - 15.0) + 10.0)
+}
 
 pub const CONTRAST_NAMES: [&str; 3] = ["Soft shadow", "Black halo (blurs out)", "Black outline"];
 /// Transition styles; index 0 is "None" and the last entry picks a random one each time.
@@ -128,6 +135,8 @@ fn prepare(rast: &mut Rasterizer, text: &str, px: i32, pad: i32, th: i32, style:
 struct Locs {
     bg_res: i32,
     bg_time: i32,
+    bub: i32,
+    bcol: i32,
     blit_src: i32,
     blit_bright: i32,
     blit_t: i32,
@@ -138,7 +147,8 @@ struct Locs {
     text_mode: i32,
     text_pass: i32,
     tr_scene: i32,
-    tr_outside: i32,
+    tr_small: i32,
+    tr_dark: i32,
     tr_p: i32,
     tr_style: i32,
     tr_res: i32,
@@ -155,6 +165,8 @@ struct MultiState {
     noise: u32,
     sw: i32,
     sh: i32,
+    /// Pixel size of each buffer (the simulation size unless the pass asks for a fixed one).
+    bsize: Vec<(i32, i32)>,
     last_step: f64,
 }
 
@@ -188,13 +200,27 @@ pub struct Renderer {
     multi: Option<MultiState>,
     sim_fbo: u32,
     trans_prog: u32,
+    down_prog: u32,
+    down_src: i32,
+    down_texel: i32,
+    /// Quarter-resolution copy of the scene for the blur transition.
+    bl_fbo: [u32; 2],
+    bl_tex: [u32; 2],
+    blur_prog: u32,
+    blur_src: i32,
+    blur_r: i32,
+    blur_ia: i32,
+    bl_w: i32,
+    bl_h: i32,
     /// Offscreen copy of the finished frame, only used while a transition is running.
     sc_fbo: u32,
     sc_tex: u32,
     sc_w: i32,
     sc_h: i32,
-    /// The screen as it was before the screensaver appeared (or is behind it when it leaves); 1x1 black until set.
-    out_tex: u32,
+    hwnd: HWND,
+    /// The window is WS_EX_LAYERED: fades go through its alpha so the real desktop shows through.
+    layered: bool,
+    alpha: i32,
 }
 
 const BLIT_FS: &str = "#version 120
@@ -228,37 +254,77 @@ void main(){
   else gl_FragColor = vec4(vec3(m), m) * alpha;
 }";
 
-/// Final pass while the screensaver is appearing or disappearing. `p` is visibility (0 black .. 1 normal).
+/// Box-downsample by 4 in one pass: four bilinear taps at +-1 source texel, each averaging a 2x2 block.
+const DOWN_FS: &str = "#version 120
+uniform sampler2D src; uniform vec2 texel; varying vec2 uv;
+void main(){
+  vec3 c = texture2D(src, uv + texel * vec2( 1.0,  1.0)).rgb + texture2D(src, uv + texel * vec2(-1.0,  1.0)).rgb
+         + texture2D(src, uv + texel * vec2( 1.0, -1.0)).rgb + texture2D(src, uv + texel * vec2(-1.0, -1.0)).rgb;
+  gl_FragColor = vec4(c * 0.25, 1.0);
+}";
+
+/// Blur of the quarter-resolution copy: 28 taps on a golden-angle spiral (offsets precomputed, they are the same for every pixel).
+/// Runs at quarter resolution only, because the result is smooth anyway.
+const BLUR_FS: &str = "#version 120
+uniform sampler2D src; uniform float r; uniform float ia; varying vec2 uv;
+void main(){
+  vec3 acc = vec3(0.0);
+  acc += texture2D(src, clamp(uv + vec2(0.13363 * ia, 0.00000) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.17067 * ia, 0.15635) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.02612 * ia, -0.29766) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.21512 * ia, 0.28058) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.39476 * ia, -0.06982) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.37395 * ia, -0.23789) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.12507 * ia, 0.46530) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.23855 * ia, -0.45929) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.51755 * ia, 0.18899) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.53841 * ia, 0.22227) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.25953 * ia, -0.55466) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.19182 * ia, 0.61149) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.57811 * ia, -0.33499) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.67816 * ia, -0.14912) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.41385 * ia, 0.58872) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.09565 * ia, -0.73785) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.58701 * ia, 0.49468) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.78989 * ia, 0.03271) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.57613 * ia, -0.57340) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.03850 * ia, 0.83363) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.54827 * ia, -0.65692) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.86846 * ia, 0.11679) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.73580 * ia, 0.51203) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.20101 * ia, -0.89380) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.46513 * ia, 0.81157) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.90919 * ia, -0.28998) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(0.88311 * ia, -0.40811) * r, 0.0, 1.0)).rgb;
+  acc += texture2D(src, clamp(uv + vec2(-0.38252 * ia, 0.91423) * r, 0.0, 1.0)).rgb;
+  gl_FragColor = vec4(acc / 28.0, 1.0);
+}";
+
+/// Final pass while the screensaver is appearing or disappearing, for the effects that need a shader: `p` is visibility
+/// (0 hidden .. 1 normal). In a layered window the compositor does the fading (the real desktop shows through), so this only
+/// blurs or zooms what we rendered; `dark` is 1 where there is no layered window (the settings preview) and then also
+/// fades to black here.
 const TRANS_FS: &str = "#version 120
-uniform sampler2D scene; uniform sampler2D outside; uniform float p; uniform int style; uniform vec2 res; varying vec2 uv;
+uniform sampler2D scene; uniform sampler2D small; uniform float p; uniform int style; uniform float dark; uniform vec2 res; varying vec2 uv;
 float ease(float x){ x = clamp(x, 0.0, 1.0); return x*x*x*(x*(x*6.0-15.0)+10.0); }
-// B = the screensaver frame, A = what was on screen before it started / is behind it when it ends (black if unknown)
 vec3 B(vec2 c){ return texture2D(scene, clamp(c, 0.0, 1.0)).rgb; }
-vec3 A(vec2 c){ return texture2D(outside, clamp(c, 0.0, 1.0)).rgb; }
+vec3 S(vec2 c){ return texture2D(small, clamp(c, 0.0, 1.0)).rgb; } // quarter-resolution blurred copy (style 2)
 void main(){
   float e = ease(p);
   float asp = res.x / res.y;
   vec3 c;
   if (style == 2) {
-    // cross blur: both pictures defocus as they swap, the screensaver sharpening out of the haze
-    float r = sin(3.14159265 * e) * 0.06;
-    vec3 a = vec3(0.0);
-    vec3 b = vec3(0.0);
-    for (int i = 0; i < 24; i++) {
-      float ang = float(i) * 2.39996;
-      float rr = sqrt((float(i) + 0.5) / 24.0);
-      vec2 o = vec2(cos(ang) / asp, sin(ang)) * rr * r;
-      a += A(uv + o);
-      b += B(uv + o);
-    }
-    c = mix(a, b, smoothstep(0.15, 0.85, e)) / 24.0;
+    // blur fade: the picture comes into focus as it appears (and defocuses as it leaves). The blur itself is computed
+    // at quarter resolution (BLUR_FS); here it is just upscaled, handing over to the sharp image near the end.
+    c = mix(S(uv), B(uv), smoothstep(0.8, 1.0, e));
   } else if (style == 3) {
-    // zoom: the screensaver pulls back from a close-up as it fades over the old screen (and dives in as it leaves)
+    // zoom: pulls back from a close-up as it appears (and dives in as it leaves)
     float s = mix(0.62, 1.0, e);
-    c = mix(A(uv), B((uv - 0.5) * s + 0.5), e);
+    c = B((uv - 0.5) * s + 0.5);
   } else {
-    c = mix(A(uv), B(uv), e);
+    c = B(uv);
   }
+  c *= mix(1.0, e, dark);
   gl_FragColor = vec4(c, 1.0);
 }";
 
@@ -268,7 +334,7 @@ impl Renderer {
         let mut pfd: PIXELFORMATDESCRIPTOR = std::mem::zeroed();
         pfd.nSize = std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as u16;
         pfd.nVersion = 1;
-        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER | PFD_SUPPORT_COMPOSITION; // composition: let the compositor handle this window (alpha, capture)
         pfd.iPixelType = PFD_TYPE_RGBA;
         pfd.cColorBits = 24;
         let fmt = ChoosePixelFormat(hdc, &pfd);
@@ -288,10 +354,16 @@ impl Renderer {
         let blit_prog = gl::program(&g, BLIT_FS)?;
         let text_prog = gl::program(&g, TEXT_FS)?;
         let trans_prog = gl::program(&g, TRANS_FS)?;
+        let down_prog = gl::program(&g, DOWN_FS)?;
+        let (down_src, down_texel) = (gl::uloc(&g, down_prog, "src"), gl::uloc(&g, down_prog, "texel"));
+        let blur_prog = gl::program(&g, BLUR_FS)?;
+        let (blur_src, blur_r, blur_ia) = (gl::uloc(&g, blur_prog, "src"), gl::uloc(&g, blur_prog, "r"), gl::uloc(&g, blur_prog, "ia"));
         let bg_prog = gl::program(&g, &bg::source(bg_idx))?;
         let loc = Locs {
             bg_res: gl::uloc(&g, bg_prog, "wx_res"),
             bg_time: gl::uloc(&g, bg_prog, "iTime"),
+            bub: gl::uloc(&g, bg_prog, "bub"),
+            bcol: gl::uloc(&g, bg_prog, "bcol"),
             blit_src: gl::uloc(&g, blit_prog, "src"),
             blit_bright: gl::uloc(&g, blit_prog, "bright"),
             blit_t: gl::uloc(&g, blit_prog, "t"),
@@ -302,7 +374,8 @@ impl Renderer {
             text_mode: gl::uloc(&g, text_prog, "mode"),
             text_pass: gl::uloc(&g, text_prog, "pass"),
             tr_scene: gl::uloc(&g, trans_prog, "scene"),
-            tr_outside: gl::uloc(&g, trans_prog, "outside"),
+            tr_small: gl::uloc(&g, trans_prog, "small"),
+            tr_dark: gl::uloc(&g, trans_prog, "dark"),
             tr_p: gl::uloc(&g, trans_prog, "p"),
             tr_style: gl::uloc(&g, trans_prog, "style"),
             tr_res: gl::uloc(&g, trans_prog, "res"),
@@ -350,31 +423,27 @@ impl Renderer {
             multi: None,
             sim_fbo: 0,
             trans_prog,
+            down_prog,
+            down_src,
+            down_texel,
+            bl_fbo: [0; 2],
+            bl_tex: [0; 2],
+            blur_prog,
+            blur_src,
+            blur_r,
+            blur_ia,
+            bl_w: 0,
+            bl_h: 0,
             sc_fbo: 0,
             sc_tex: 0,
             sc_w: 0,
             sc_h: 0,
-            out_tex: 0,
+            hwnd,
+            layered: GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED != 0,
+            alpha: -1,
         };
-        r.set_outside(1, 1, &[0, 0, 0, 255]);
         r.ensure_fbo(w, h);
         Ok(r)
-    }
-
-    /// Give the transitions something to blend with: a BGRA, bottom-up screenshot of the screen without the saver.
-    pub unsafe fn set_outside(&mut self, w: i32, h: i32, bgra: &[u8]) {
-        const GL_BGRA: u32 = 0x80E1;
-        wglMakeCurrent(self.hdc, self.rc);
-        if self.out_tex == 0 {
-            glGenTextures(1, &mut self.out_tex);
-        }
-        glBindTexture(GL_TEXTURE_2D, self.out_tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra.as_ptr() as *const _);
     }
 
     /// Swap the text font (settings preview); cached glyph runs are rebuilt on the next frame.
@@ -384,6 +453,33 @@ impl Renderer {
         self.keys = Default::default();
         self.ready.clear();
         self.pending.clear();
+    }
+
+    /// Quarter-resolution targets for the blur transition: [0] the shrunk scene, [1] its blur.
+    unsafe fn ensure_blur(&mut self, tw: i32, th: i32) {
+        let (w, h) = ((tw / 4).max(16), (th / 4).max(16));
+        if self.bl_fbo[0] != 0 && w == self.bl_w && h == self.bl_h {
+            return;
+        }
+        for k in 0..2 {
+            if self.bl_fbo[k] == 0 {
+                (self.gl.GenFramebuffers)(1, &mut self.bl_fbo[k]);
+            } else {
+                glDeleteTextures(1, &self.bl_tex[k]);
+            }
+            glGenTextures(1, &mut self.bl_tex[k]);
+            glBindTexture(GL_TEXTURE_2D, self.bl_tex[k]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+            (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.bl_fbo[k]);
+            (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.bl_tex[k], 0);
+        }
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
+        self.bl_w = w;
+        self.bl_h = h;
     }
 
     /// Offscreen colour buffer the finished frame is drawn into while a transition runs.
@@ -533,6 +629,8 @@ impl Renderer {
                     self.bg_prog = gl::program(&self.gl, &bg::source(0)).unwrap_or(self.bg_prog);
                     self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
                     self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
+                    self.loc.bub = gl::uloc(&self.gl, self.bg_prog, "bub");
+        self.loc.bcol = gl::uloc(&self.gl, self.bg_prog, "bcol");
                 }
             }
             self.bg = idx;
@@ -541,6 +639,8 @@ impl Renderer {
         self.bg_prog = gl::program(&self.gl, &bg::source(idx)).unwrap_or(self.bg_prog);
         self.loc.bg_res = gl::uloc(&self.gl, self.bg_prog, "wx_res");
         self.loc.bg_time = gl::uloc(&self.gl, self.bg_prog, "iTime");
+        self.loc.bub = gl::uloc(&self.gl, self.bg_prog, "bub");
+        self.loc.bcol = gl::uloc(&self.gl, self.bg_prog, "bcol");
         self.bg = idx;
     }
 
@@ -577,6 +677,7 @@ impl Renderer {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT as i32);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT as i32);
         }
+        let bsize: Vec<(i32, i32)> = spec.buffers.iter().map(|p| p.size.unwrap_or((sw, sh))).collect();
         let mut tex = vec![[0u32; 2]; n];
         if self.sim_fbo == 0 {
             (self.gl.GenFramebuffers)(1, &mut self.sim_fbo);
@@ -587,14 +688,14 @@ impl Renderer {
                 glGenTextures(1, &mut tex[k][j]);
                 glBindTexture(GL_TEXTURE_2D, tex[k][j]);
                 // 32-bit float: feedback trails multiply by <1 every step, which half-float rounding would stall
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, sw, sh, 0, GL_RGBA, GL_FLOAT_, std::ptr::null());
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, bsize[k].0, bsize[k].1, 0, GL_RGBA, GL_FLOAT_, std::ptr::null());
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, if mip[k] { gl::LINEAR_MIPMAP_LINEAR } else { GL_LINEAR as i32 });
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
                 // start from black
                 (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[k][j], 0);
-                glViewport(0, 0, sw, sh);
+                glViewport(0, 0, bsize[k].0, bsize[k].1);
                 glClearColor(0.0, 0.0, 0.0, 0.0);
                 glClear(GL_COLOR_BUFFER_BIT);
                 if mip[k] {
@@ -603,7 +704,7 @@ impl Renderer {
             }
         }
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
-        Ok(MultiState { spec, progs, tex, read: vec![0; n], mip, noise, sw, sh, last_step: f64::NEG_INFINITY })
+        Ok(MultiState { spec, progs, tex, read: vec![0; n], mip, noise, sw, sh, bsize, last_step: f64::NEG_INFINITY })
     }
 
     unsafe fn free_multi(&mut self) {
@@ -620,7 +721,7 @@ impl Renderer {
         }
     }
 
-    unsafe fn bind_inputs(&self, m: &MultiState, inputs: &[bg::Src; 4], prog: u32) {
+    unsafe fn bind_inputs(&self, m: &MultiState, inputs: &[bg::Src; 5], prog: u32) {
         for (n, s) in inputs.iter().enumerate() {
             let tex = match s {
                 bg::Src::Buf(b, _) => m.tex[*b][m.read[*b]],
@@ -651,13 +752,14 @@ impl Renderer {
         if t - m.last_step >= SIM_STEP - 0.001 || t < m.last_step {
             m.last_step = t;
             (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.sim_fbo);
-            glViewport(0, 0, m.sw, m.sh);
             for k in 0..n {
                 let write = 1 - m.read[k];
                 (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, m.tex[k][write], 0);
                 let prog = m.progs[k];
                 (self.gl.UseProgram)(prog);
-                (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), m.sw as f32, m.sh as f32);
+                glViewport(0, 0, m.bsize[k].0, m.bsize[k].1);
+                (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), m.bsize[k].0 as f32, m.bsize[k].1 as f32);
+                (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "wx_aspect"), m.sw as f32 / m.sh as f32);
                 (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
                 (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTimeDelta"), SIM_STEP as f32);
                 self.bind_inputs(&m, &m.spec.buffers[k].inputs, prog);
@@ -675,6 +777,7 @@ impl Renderer {
         let prog = m.progs[n];
         (self.gl.UseProgram)(prog);
         (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), self.fw as f32, self.fh as f32);
+        (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "wx_aspect"), m.sw as f32 / m.sh as f32);
         (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
         (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTimeDelta"), SIM_STEP as f32);
         self.bind_inputs(&m, &m.spec.image.inputs, prog);
@@ -682,18 +785,51 @@ impl Renderer {
         self.multi = Some(m);
     }
 
+    /// Geometry backgrounds: clear, then one additively blended quad per object (see bg::is_geometry).
+    unsafe fn render_geometry(&mut self, bg_idx: usize, sim_t: f32) {
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
+        glViewport(0, 0, self.fw, self.fh);
+        glClearColor(0.0, 0.0, 0.0, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        let aspect = self.fw as f32 / self.fh as f32;
+        let data = bg::geometry_data(bg_idx, sim_t, aspect);
+        (self.gl.UseProgram)(self.bg_prog);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        for o in data.chunks_exact(8) {
+            let (px, py, rad) = (o[0], o[1], o[2]);
+            // skip bubbles that are completely off screen (the scene spans x in -aspect..aspect, y in -1..1)
+            if px + rad < -aspect || px - rad > aspect || py + rad < -1.0 || py - rad > 1.0 {
+                continue;
+            }
+            (self.gl.Uniform4f)(self.loc.bub, px, py, rad, 0.0);
+            (self.gl.Uniform3f)(self.loc.bcol, o[4], o[5], o[6]);
+            glBegin(GL_QUADS);
+            for (sx, sy) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                glTexCoord2f(sx * rad, sy * rad);
+                glVertex2f((px + sx * rad) / aspect, py + sy * rad);
+            }
+            glEnd();
+        }
+        glDisable(GL_BLEND);
+    }
+
     /// Draw one frame. `target` = (fbo, w, h) for offscreen rendering, None for the window.
     pub unsafe fn render(&mut self, f: &Frame, target: Option<(u32, i32, i32)>) {
         wglMakeCurrent(self.hdc, self.rc);
         let (tw, th) = target.map_or((self.w, self.h), |t| (t.1, t.2));
-        self.ensure_fbo(tw, th);
+        // the background is rendered at a fraction of the output size when asked (scaled up by the blit; text stays sharp)
+        let sc = f.cfg.render_scale.clamp(25, 100) as i32;
+        self.ensure_fbo(tw * sc / 100, th * sc / 100);
         if f.bg != self.bg {
             self.set_background(f.bg, tw, th);
         }
         glDisable(GL_BLEND);
         // 1. background -> offscreen
         let sim_t = (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)];
-        if self.multi.is_some() {
+        if bg::is_geometry(f.bg) && self.multi.is_none() {
+            self.render_geometry(f.bg, sim_t);
+        } else if self.multi.is_some() {
             self.render_multi(f.t, sim_t, tw, th);
         } else {
             (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
@@ -705,7 +841,15 @@ impl Renderer {
         }
         // 2. blit to target (or to the scene buffer first, while a transition is running)
         let target_fbo = target.map_or(0, |t| t.0);
-        let trans = f.vis < 0.999 && f.tstyle != 0;
+        // fades: a layered window is faded by the compositor (the desktop shows through); blur and zoom still need our shader
+        if self.layered {
+            let alpha = (ease(f.vis) * 255.0 + 0.5) as i32;
+            if alpha != self.alpha {
+                self.alpha = alpha;
+                SetLayeredWindowAttributes(self.hwnd, 0, alpha as u8, LWA_ALPHA);
+            }
+        }
+        let trans = f.vis < 0.999 && (f.tstyle >= 2 || (f.tstyle == 1 && !self.layered));
         let dst = if trans {
             self.ensure_scene(tw, th);
             self.sc_fbo
@@ -727,16 +871,36 @@ impl Renderer {
         }
         // 4. transition: the finished frame goes through the transition shader to the real target
         if trans {
+            if f.tstyle == 2 {
+                // blur: shrink the scene to a quarter of its size first; the blur samples that small copy
+                self.ensure_blur(tw, th);
+                (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.bl_fbo[0]);
+                glViewport(0, 0, self.bl_w, self.bl_h);
+                (self.gl.UseProgram)(self.down_prog);
+                (self.gl.ActiveTexture)(gl::TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, self.sc_tex);
+                (self.gl.Uniform1i)(self.down_src, 0);
+                (self.gl.Uniform2f)(self.down_texel, 1.0 / tw as f32, 1.0 / th as f32);
+                Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+                // ... then blur the small copy (radius in screen heights, shrinking to zero as the picture appears)
+                (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.bl_fbo[1]);
+                (self.gl.UseProgram)(self.blur_prog);
+                glBindTexture(GL_TEXTURE_2D, self.bl_tex[0]);
+                (self.gl.Uniform1i)(self.blur_src, 0);
+                (self.gl.Uniform1f)(self.blur_r, (1.0 - ease(f.vis)) * 0.07);
+                (self.gl.Uniform1f)(self.blur_ia, th as f32 / tw as f32);
+                Self::quad(-1.0, -1.0, 1.0, 1.0, false);
+            }
             (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, target_fbo);
             glViewport(0, 0, tw, th);
             (self.gl.UseProgram)(self.trans_prog);
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
+            glBindTexture(GL_TEXTURE_2D, if f.tstyle == 2 { self.bl_tex[1] } else { self.sc_tex });
+            (self.gl.Uniform1i)(self.loc.tr_small, 1);
             (self.gl.ActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, self.sc_tex);
             (self.gl.Uniform1i)(self.loc.tr_scene, 0);
-            (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
-            glBindTexture(GL_TEXTURE_2D, self.out_tex);
-            (self.gl.ActiveTexture)(gl::TEXTURE0);
-            (self.gl.Uniform1i)(self.loc.tr_outside, 1);
+            (self.gl.Uniform1f)(self.loc.tr_dark, if self.layered { 0.0 } else { 1.0 });
             (self.gl.Uniform1f)(self.loc.tr_p, f.vis.max(0.0));
             (self.gl.Uniform1i)(self.loc.tr_style, f.tstyle as i32);
             (self.gl.Uniform2f)(self.loc.tr_res, tw as f32, th as f32);
@@ -857,6 +1021,44 @@ impl Renderer {
         }
         }
         glDisable(GL_BLEND);
+    }
+
+    /// Developer benchmark: average milliseconds per frame for `frames` frames of background `bg` rendered offscreen
+    /// at w x h (GPU-synchronised with glFinish, no vsync involved).
+    pub unsafe fn bench(&mut self, cfg: &Config, wx: &Weather, bg: usize, w: i32, h: i32, frames: u32) -> f64 {
+        wglMakeCurrent(self.hdc, self.rc);
+        let (mut tex, mut fbo) = (0u32, 0u32);
+        glGenTextures(1, &mut tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+        (self.gl.GenFramebuffers)(1, &mut fbo);
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, fbo);
+        (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        let mut st: SYSTEMTIME = std::mem::zeroed();
+        windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st);
+        // dev: WXSCR_BENCH_TRANS=<style>:<visibility> benchmarks a frame in the middle of a transition
+        let (bvis, bstyle) = match std::env::var("WXSCR_BENCH_TRANS") {
+            Ok(v) => {
+                let p: Vec<&str> = v.split(':').collect();
+                (p.get(1).and_then(|x| x.parse().ok()).unwrap_or(1.0f32), p.first().and_then(|x| x.parse().ok()).unwrap_or(0usize))
+            }
+            Err(_) => (1.0, 0),
+        };
+        let frame = |t: f64| Frame { t, cfg, wx: Some(wx), show_text: true, bg, now: st, vis: bvis, tstyle: bstyle };
+        for k in 0..20 {
+            self.render(&frame(100.0 + k as f64 / 60.0), Some((fbo, w, h)));
+        }
+        glFinish();
+        let mut best = f64::MAX;
+        for round in 0..3 {
+            let t0 = std::time::Instant::now();
+            for k in 0..frames {
+                self.render(&frame(101.0 + (round * frames + k) as f64 / 60.0), Some((fbo, w, h)));
+                glFinish();
+            }
+            best = best.min(t0.elapsed().as_secs_f64() * 1000.0 / frames as f64);
+        }
+        best
     }
 
     /// Render one frame offscreen and return top-down RGB (developer /snap command).

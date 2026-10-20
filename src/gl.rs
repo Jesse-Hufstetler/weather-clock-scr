@@ -64,7 +64,10 @@ gl_fns! {
     DeleteProgram(u32);
     GetUniformLocation(u32, *const i8) -> i32;
     Uniform1f(i32, f32);
+    Uniform4fv(i32, i32, *const f32);
     Uniform2f(i32, f32, f32);
+    Uniform3f(i32, f32, f32, f32);
+    Uniform4f(i32, f32, f32, f32, f32);
     Uniform1i(i32, i32);
     GenFramebuffers(i32, *mut u32);
     BindFramebuffer(u32, u32);

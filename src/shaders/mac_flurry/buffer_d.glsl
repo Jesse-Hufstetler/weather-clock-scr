@@ -1,6 +1,8 @@
 // "mac flurry screensaver" by ufffd - https://www.shadertoy.com/view/lX2SDt (CC BY-NC-SA 3.0 default)
 // Buffer D: sums all the 'tails' from buffers A, B and C, colorizes them, and adds a glowy feedback layer.
-// Only change: `O-=O;` (relies on O starting at zero, which desktop GLSL does not guarantee) is written `O = vec4(0.);`.
+// Changes: `O-=O;` (relies on O starting at zero, which desktop GLSL does not guarantee) is written `O = vec4(0.);`, and the
+// per-frame colour constants (14 simplex-noise calls per pixel in the original, identical for every pixel) come from the
+// noise-field pass instead (see field.glsl).
 
 void mainImage( out vec4 O, in vec2 xy )
 {
@@ -11,18 +13,18 @@ void mainImage( out vec4 O, in vec2 xy )
     t[1] = texture(iChannel1,uv),
     t[2] = texture(iChannel2,uv);
     O = vec4(0.);
-    vec3 rootcol = vec3(
-        snoise(vec3(10.,10.,iTime*.1)),
-        .6+snoise(vec3(1.5,1.5,iTime*.1))*.2,
-        1.
-    );
-    for (int i=0;i <3;i++)
-    for (int j=0;j<4;j++) {
-        vec3 col = rootcol;
-        col.r = mix(rootcol.r,snoise(vec3(float(i)*10.,float(j)*10.,iTime*.1)),0.2);
-        col.r += length(uvc)*.1;
-        col = hsv2rgb(col);
-        O+=t[i][j]*vec4(col,1.);
+    vec4 rc = nf(7., uv);
+    vec3 rootcol = vec3(rc.x, rc.y, 1.);
+    float radial = length(uvc)*.1;
+    for (int i=0;i <3;i++) {
+        vec4 hue = nf(8.+float(i), uv);
+        for (int j=0;j<4;j++) {
+            vec3 col = rootcol;
+            col.r = mix(rootcol.r,hue[j],0.2);
+            col.r += radial;
+            col = hsv2rgb(col);
+            O+=t[i][j]*vec4(col,1.);
+        }
     }
     vec4 lp = texture(iChannel3,uv,0.5);
     lp.rgb = (lp.rgb - 0.504)*1.001 + 0.5;

@@ -8,7 +8,7 @@ Chromium-web-page screensaver + `dash2.html` setup.
 - **Clearly labelled**: big *feels like* temperature and a smaller *dew point*, each with a caption. Optional line with
   high/low, rain chance, wind and next sunrise/sunset. All text is fully opaque.
 - **Readable on anything**: pick how the text is kept legible over busy backgrounds: a soft shadow, a black halo that blurs out to nothing, or a thick black outline.
-- **Transitions**: the screensaver dissolves out of whatever was on screen when it starts, and back into the real screen when you touch something (it grabs a screenshot just before appearing and blends with it both ways). Choose fade, blur fade, zoom, none or random; picking one in settings replays it in the preview, and the *Fullscreen-size test* uses it too.
+- **Transitions**: the screensaver fades in over whatever was on screen when it starts and fades back out to the live desktop when you touch something (the window's own transparency is animated, so the real desktop shows through). Choose fade, blur fade (the scene focuses in), zoom, none or random; picking one in settings replays it in the preview, and the *Fullscreen-size test* uses it too.
 - **Backgrounds**: your own *SKEENSAVUH* bubbles shader (the default) plus thirteen other Shadertoy shaders (Random gallery, Frozen flame cavern, Zippy zaps, Perhaps a screensaver, Hex crystal, Mac flurry, Spiral journey, Screensaver squares, Rainbeam, Zooming bokeh, Ultra liquid bokeh, Ice and fire, Wavy background), or random. Multipass shaders with feedback buffers (Mac flurry, Spiral journey, Rainbeam) are supported by a small Shadertoy-style engine. Author, license, source, retrieval date and changes show in settings under the preview, with a full list under **Credits…**.
 - **Smooth and light**: native resolution at your display's refresh rate (paced by vsync, so it idles the CPU: a few percent of one core here). Optional fps cap and a brightness slider for OLED; the text breathes and drifts slowly against burn-in.
 - Works across multiple monitors, per-monitor DPI aware, cached weather so numbers show instantly on start.
@@ -32,13 +32,29 @@ Right-click `Weather Clock.scr` → **Install**, then pick it in Screen Saver Se
 | `/p <hwnd>` | preview in the Windows settings thumbnail |
 | `/w` | full-size test run on the primary monitor (quits on mouse move or key, like the saver) |
 | `/snap <prefix> [w h [bg]]` | render backgrounds offscreen to `<prefix>-N.png` (dev) |
+| `/bench [w h [frames [bg]]]` | time every background offscreen at w x h (default 1920x1080) and write ms/frame to `log.txt` (dev) |
 
 Settings live in `%APPDATA%\wxscr\config.json`; the weather cache and a small `log.txt` are next to it.
 
+## Performance
+
+Several backgrounds were restructured so the GPU does not repeat work that is the same for every pixel (the pictures are unchanged; see
+`THIRD_PARTY.md` for the per-file notes). Measured at 1920x1080 on an Intel HD 4600 (ms per frame, lower is better):
+
+| background | before | after |
+|---|---|---|
+| Mac flurry | 49 | 10 |
+| Ultra liquid bokeh | 117 | 15 |
+| Ice and fire | 41 | 12.5 |
+| Screensaver squares | 28 | 9.5 |
+
+The heaviest ones are ray-marching shaders that really do a lot of work per pixel (Frozen flame ~150 ms, Perhaps a screensaver ~117 ms on
+that GPU). If a background is too heavy for your GPU, set **Render resolution** in settings to 75% or 50%: the background is rendered
+smaller and scaled up while the clock text stays sharp.
+
 ## Known issues
 
-- A faint black flash can still show along the taskbar when the screensaver starts or stops (the shell reshuffles the taskbar around the full-screen window).
-- The transition back to the desktop blends with a screenshot taken when the screensaver started, so changes on screen in the meantime pop at the end.
+- The screensaver window is one pixel shorter than the screen on purpose: a window that covers the whole monitor makes Windows redraw the taskbar with a black bar along its top at start and exit, and one that exactly matches the monitor bypasses the compositor so it cannot fade. The cost is a one-pixel strip along the very bottom edge that shows what is behind it.
 
 ## Notes
 

@@ -48,11 +48,14 @@ const ID_MOVE_V: i32 = 118;
 const ID_AUTO: i32 = 122;
 const ID_CONTRAST: i32 = 123;
 const ID_TRANS: i32 = 124;
+const ID_SCALE: i32 = 125;
 /// Posted by the detection thread when `DETECT_RESULT` is ready.
 const WM_DETECTED: u32 = WM_APP + 1;
 
 const FPS_OPTS: [u32; 3] = [0, 60, 30];
 const FPS_NAMES: [&str; 3] = ["Match display refresh rate (smoothest)", "Cap at 60 fps", "Cap at 30 fps"];
+const SCALE_OPTS: [u32; 3] = [100, 75, 50];
+const SCALE_NAMES: [&str; 3] = ["Native (sharpest)", "75% (lighter)", "50% (much lighter)"];
 const REFRESH_OPTS: [u32; 4] = [10, 20, 30, 60];
 const MON_OPTS: [&str; 3] = ["Clock on every monitor", "Clock on main monitor, background on others", "Clock on main monitor, others black"];
 const FONT_OPTS: [&str; 5] = ["Droid Sans Mono (bundled)", "Segoe UI", "Consolas", "Bahnschrift", "Cascadia Mono"];
@@ -78,7 +81,7 @@ const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 478;
+const CONTENT_H: i32 = 508;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -196,6 +199,9 @@ unsafe fn build(panel: HWND) {
     y += 30;
     label("Frame rate", y);
     combo(ID_FPS, &FPS_NAMES, FPS_OPTS.iter().position(|f| *f == cfg.fps).unwrap_or(0), y, CBS_DROPDOWNLIST as u32);
+    y += 30;
+    label("Render resolution", y);
+    combo(ID_SCALE, &SCALE_NAMES, SCALE_OPTS.iter().position(|v| *v == cfg.render_scale).unwrap_or(0), y, CBS_DROPDOWNLIST as u32);
     y += 30;
     label("Brightness", y);
     let tb = |id: i32, vid: i32, lo: i32, hi: i32, val: i32, y: i32| {
@@ -408,6 +414,7 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
     cfg.details = checked(dlg, ID_DETAILS);
     cfg.background = sel(dlg, ID_BG);
     cfg.fps = FPS_OPTS[sel(dlg, ID_FPS).min(2)];
+    cfg.render_scale = SCALE_OPTS[sel(dlg, ID_SCALE).min(2)];
     cfg.brightness = SendMessageW(item(dlg, ID_BRIGHT), TBM_GETPOS_, 0, 0) as u32;
     cfg.movement = SendMessageW(item(dlg, ID_MOVE), TBM_GETPOS_, 0, 0) as u32;
     cfg.contrast = sel(dlg, ID_CONTRAST).min(render::CONTRAST_NAMES.len() - 1);

@@ -38,6 +38,38 @@ pub fn index_to_id(i: usize) -> &'static str {
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
 pub const TIME_SCALE: [f32; 14] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
+/// Backgrounds drawn as geometry (one additively blended quad per object) instead of one big fragment shader. Their source
+/// file is a plain fragment shader for one object, not a Shadertoy mainImage.
+pub fn is_geometry(i: usize) -> bool {
+    i == 11
+}
+
+/// The objects of a geometry background for shader time `t` and buffer aspect: 8 floats each, see `bokeh_data`.
+pub fn geometry_data(i: usize, t: f32, aspect: f32) -> Vec<f32> {
+    if i == 11 { bokeh_data(t, aspect) } else { Vec::new() }
+}
+
+/// Ultra liquid bokeh: the 128 bubbles of the original shader (position, radius, radius squared, colour as (z, y, x, 0)),
+/// evaluated once per frame instead of once per pixel. Same formulas as the shader's loop body; arguments are rounded to f32 first like the GPU does.
+fn bokeh_data(t: f32, aspect: f32) -> Vec<f32> {
+    let sin = |x: f32| (x as f64).sin() as f32;
+    let mut out = Vec::with_capacity(128 * 8);
+    for i in 0..128 {
+        let fi = i as f32;
+        let pha = sin(fi * 546.13 + 1.0) * 0.5 + 0.5;
+        let siz = (sin(fi * 651.74 + 5.0) * 0.5 + 0.5).powf(4.0);
+        let pox = sin(fi * 321.55 + 4.1) * aspect;
+        let rad = 0.1 + 0.5 * siz + sin(pha + siz) / 4.0;
+        let k = pha + 0.3 * (t / 7.0) * (0.2 + 0.8 * siz);
+        let pos = (pox + sin(t / 15.0 + pha + siz), -1.0 - rad + (2.0 + 2.0 * rad) * (k - k.floor()));
+        let m = 0.5 + 0.5 * sin(fi);
+        let (c0, c1) = ([0.194 * sin(t / 6.0) + 0.3, 0.2, 0.3 * pha], [1.1 * sin(t / 9.0) + 0.3, 0.2 * pha, 0.4]);
+        let col = [c0[0] + (c1[0] - c0[0]) * m, c0[1] + (c1[1] - c0[1]) * m, c0[2] + (c1[2] - c0[2]) * m];
+        out.extend_from_slice(&[pos.0, pos.1, rad, rad * rad, col[2], col[1], col[0], 0.0]);
+    }
+    out
+}
+
 /// Who made each background and under what terms (shown in the settings window).
 pub struct Credit {
     pub author: &'static str,
@@ -77,21 +109,21 @@ pub const CREDITS: [Credit; 14] = [
         license: SHADERTOY_DEFAULT,
         source: "shadertoy.com/view/XXyGzh",
         retrieved: "2026-10-18",
-        changes: "Zero-initialised i, split one dot(u *= m, u) for defined order; playback 0.6x",
+        changes: "Zero-initialised i, split one dot(u *= m, u) for defined order, loop written out plainly and mat2 built component by component (driver crash workarounds); playback 0.6x",
     },
     Credit {
         author: "pirandello (fork of \"Trailing the Twinkling Tunnelwisp\"; orig. BeRo & Paul Karlik)",
         license: "CC0 / public domain (stated in the shader)",
         source: "shadertoy.com/view/Wfy3zh",
         retrieved: "2026-10-18",
-        changes: "Image pass only (sound omitted); zero-initialised locals; split one dot(sin(p *= s), ..) for defined order",
+        changes: "Image pass only (sound omitted); zero-initialised locals; split one dot(sin(p *= s), ..) for defined order; mat2 built component by component (a driver crash workaround)",
     },
     Credit {
         author: "ChunderFPV (hexagonal tiles by lomateron)",
         license: SHADERTOY_DEFAULT,
         source: "shadertoy.com/view/ct2SWw",
         retrieved: "2026-10-18",
-        changes: "Unmodified code (iMouse supplied as constant 0, so it auto-rotates)",
+        changes: "RT() builds its mat2 component by component (a driver crash workaround); iMouse supplied as constant 0, so it auto-rotates",
     },
     Credit {
         author: "ufffd (simplex noise by Ian McEwan / Ashima Arts, MIT)",
@@ -112,7 +144,7 @@ pub const CREDITS: [Credit; 14] = [
         license: SHADERTOY_DEFAULT,
         source: "shadertoy.com/view/Wdcyz7",
         retrieved: "2026-10-18",
-        changes: "Renamed one local variable (star -> st) that shadowed a function",
+        changes: "Renamed one local variable (star -> st) that shadowed a function; the colour of every grid cell is computed once per frame into a table instead of per pixel (same picture, much faster)",
     },
     Credit {
         author: "Inityx",
@@ -133,14 +165,14 @@ pub const CREDITS: [Credit; 14] = [
         license: "CC BY-NC-SA 3.0 Unported (stated in the shader)",
         source: "shadertoy.com/view/MtdXzr (original: shadertoy.com/view/4dl3zn)",
         retrieved: "2026-10-18",
-        changes: "Unmodified code",
+        changes: "Each bubble is drawn as a quad with additive blending and its values are computed once per frame on the CPU, instead of every pixel looping over all 128 bubbles (same picture, much faster); formulas unmodified",
     },
     Credit {
         author: "mattz (palette, hash and barycentric helpers adapted from ll2GD3, 4djSRW, lslXDf as credited in the code)",
         license: "CC BY-NC-SA 3.0 Unported (stated in the shader)",
         source: "shadertoy.com/view/MdfBzl",
         retrieved: "2026-10-18",
-        changes: "Unmodified code",
+        changes: "The jittered lattice points are computed once per frame into a small table instead of per pixel (same picture, much faster); otherwise unmodified",
     },
     Credit {
         author: "gigaherz",
@@ -226,7 +258,8 @@ pub const HEADER: &str = "#version 120
 uniform vec2 wx_res;
 uniform float iTime;
 uniform float iTimeDelta;
-uniform sampler2D iChannel0, iChannel1, iChannel2, iChannel3;
+uniform sampler2D iChannel0, iChannel1, iChannel2, iChannel3, iChannel4;
+uniform float wx_aspect; // width / height of the simulation buffers (for passes whose size differs from it)
 #define texture texture2D
 #define iResolution vec3(wx_res, 1.0)
 #define iMouse vec4(0.0)
@@ -242,6 +275,9 @@ vec3 wx_round(vec3 x){ return floor(x + 0.5); }
 pub const FOOTER: &str = "\nvoid main(){ vec4 c; mainImage(c, gl_FragCoord.xy); gl_FragColor = c; }\n";
 
 pub fn source(i: usize) -> String {
+    if is_geometry(i) {
+        return single(i).unwrap_or(BUBBLES).to_string(); // a complete fragment shader, no Shadertoy wrapper
+    }
     // multipass backgrounds are built from their passes (see `multi`); a plain fallback keeps this total
     format!("{HEADER}{}{FOOTER}", single(i).unwrap_or(BUBBLES))
 }
@@ -255,10 +291,8 @@ fn single(i: usize) -> Option<&'static str> {
         3 => include_str!("shaders/zippy_zaps.glsl"),
         4 => include_str!("shaders/perhaps_a_screensaver.glsl"),
         5 => include_str!("shaders/hex_crystal.glsl"),
-        8 => include_str!("shaders/screensaver_squares.glsl"),
         10 => include_str!("shaders/zooming_bokeh.glsl"),
         11 => include_str!("shaders/ultra_liquid_bokeh.glsl"),
-        12 => include_str!("shaders/ice_and_fire.glsl"),
         13 => include_str!("shaders/wavy_background.glsl"),
         _ => return None,
     })
@@ -273,9 +307,11 @@ pub const FLURRY: usize = 6;
 
 pub const SPIRAL: usize = 7;
 pub const RAINBEAM: usize = 9;
+pub const ICE: usize = 12;
+pub const SQUARES: usize = 8;
 
 pub fn is_multi(i: usize) -> bool {
-    i == FLURRY || i == SPIRAL || i == RAINBEAM
+    i == FLURRY || i == SPIRAL || i == RAINBEAM || i == ICE || i == SQUARES
 }
 
 /// What an `iChannelN` reads: nothing, or the latest output of a buffer (`mip` = sampled through its mip chain).
@@ -289,7 +325,9 @@ pub enum Src {
 
 pub struct Pass {
     pub code: String,
-    pub inputs: [Src; 4],
+    pub inputs: [Src; 5],
+    /// Fixed size in pixels for a small helper buffer (None = the simulation size).
+    pub size: Option<(i32, i32)>,
 }
 
 pub struct Multi {
@@ -306,45 +344,87 @@ pub fn multi(i: usize) -> Option<Multi> {
         FLURRY => Some(flurry()),
         SPIRAL => Some(spiral()),
         RAINBEAM => Some(rainbeam()),
+        ICE => Some(ice()),
+        SQUARES => Some(squares()),
         _ => None,
     }
+}
+
+/// Ice and fire: a tiny table of the jittered lattice points (computed per frame) plus the image pass that reads it.
+fn ice() -> Multi {
+    let points = Pass {
+        code: include_str!("shaders/ice_and_fire/points.glsl").to_string(),
+        inputs: [Src::None; 5],
+        size: Some((32, 8)), // TABLE_W x TABLE_H, see common.glsl
+    };
+    let image = Pass {
+        code: include_str!("shaders/ice_and_fire/image.glsl").to_string(),
+        inputs: [Src::Buf(0, false), Src::None, Src::None, Src::None, Src::None],
+        size: None,
+    };
+    Multi { common: include_str!("shaders/ice_and_fire/common.glsl"), buffers: vec![points], image, sim_height: 360 }
+}
+
+/// Screensaver squares: a per-frame table with the colour of every grid cell that can be on screen, plus the image pass.
+fn squares() -> Multi {
+    let table = Pass {
+        code: include_str!("shaders/screensaver_squares/table.glsl").to_string(),
+        inputs: [Src::None; 5],
+        size: Some((128, 3 * 128 + 1)), // TABLE_N wide, three blocks of TABLE_N rows plus a header row (see common.glsl)
+    };
+    let image = Pass {
+        code: include_str!("shaders/screensaver_squares/image.glsl").to_string(),
+        inputs: [Src::Buf(0, false), Src::None, Src::None, Src::None, Src::None],
+        size: None,
+    };
+    Multi { common: include_str!("shaders/screensaver_squares/common.glsl"), buffers: vec![table], image, sim_height: 360 }
 }
 
 fn rainbeam() -> Multi {
     let a = Pass {
         code: include_str!("shaders/rainbeam/buffer_a.glsl").to_string(),
-        inputs: [Src::Buf(0, false), Src::Noise, Src::None, Src::None],
+        inputs: [Src::Buf(0, false), Src::Noise, Src::None, Src::None, Src::None],
+        size: None,
     };
-    let image = Pass { code: include_str!("shaders/rainbeam/image.glsl").to_string(), inputs: [Src::Buf(0, false), Src::Noise, Src::None, Src::None] };
+    let image = Pass { code: include_str!("shaders/rainbeam/image.glsl").to_string(), inputs: [Src::Buf(0, false), Src::Noise, Src::None, Src::None, Src::None], size: None };
     Multi { common: "", buffers: vec![a], image, sim_height: 360 }
 }
 
 fn spiral() -> Multi {
     let a = Pass {
         code: include_str!("shaders/spiral_journey/buffer_a.glsl").to_string(),
-        inputs: [Src::Buf(0, true), Src::Noise, Src::None, Src::None],
+        inputs: [Src::Buf(0, true), Src::Noise, Src::None, Src::None, Src::None],
+        size: None,
     };
-    let image = Pass { code: include_str!("shaders/spiral_journey/image.glsl").to_string(), inputs: [Src::Buf(0, true), Src::None, Src::None, Src::None] };
+    let image = Pass { code: include_str!("shaders/spiral_journey/image.glsl").to_string(), inputs: [Src::Buf(0, true), Src::None, Src::None, Src::None, Src::None], size: None };
     Multi { common: include_str!("shaders/spiral_journey/common.glsl"), buffers: vec![a], image, sim_height: 720 }
 }
 
 fn flurry() -> Multi {
-    let tails = |n: &str| Pass {
-        code: format!("#define TAIL_OFFSET {n}\n{}", include_str!("shaders/mac_flurry/tails.glsl")),
-        inputs: [Src::None; 4],
+    // buffer 0 is the small noise field (field.glsl); 1..3 are the tails A, B, C; 4 is D
+    let field = Pass {
+        code: include_str!("shaders/mac_flurry/field.glsl").to_string(),
+        inputs: [Src::None; 5],
+        size: Some((64 * 11, 36)), // GW * NPAN by GH, see common.glsl
     };
-    let mut a = tails("1.");
-    let mut b = tails("10.");
-    let mut c = tails("20.");
-    a.inputs[0] = Src::Buf(0, true); // A reads its own previous frame, mip-filtered
-    b.inputs[0] = Src::Buf(1, false);
-    c.inputs[0] = Src::Buf(2, false);
+    let tails = |ang: &str, dist: &str, field_buf: usize| Pass {
+        code: format!("#define ANG_PANEL {ang}\n#define DIST_PANEL {dist}\n{}", include_str!("shaders/mac_flurry/tails.glsl")),
+        inputs: [Src::None, Src::None, Src::None, Src::None, Src::Buf(field_buf, false)],
+        size: None,
+    };
+    let mut a = tails("0.", "3.", 0);
+    let mut b = tails("1.", "4.", 0);
+    let mut c = tails("2.", "5.", 0);
+    a.inputs[0] = Src::Buf(1, true); // A reads its own previous frame, mip-filtered
+    b.inputs[0] = Src::Buf(2, false);
+    c.inputs[0] = Src::Buf(3, false);
     let d = Pass {
         code: include_str!("shaders/mac_flurry/buffer_d.glsl").to_string(),
-        inputs: [Src::Buf(0, false), Src::Buf(1, false), Src::Buf(2, false), Src::Buf(3, true)],
+        inputs: [Src::Buf(1, false), Src::Buf(2, false), Src::Buf(3, false), Src::Buf(4, true), Src::Buf(0, false)],
+        size: None,
     };
-    let image = Pass { code: include_str!("shaders/mac_flurry/image.glsl").to_string(), inputs: [Src::Buf(3, false), Src::None, Src::None, Src::None] };
-    Multi { common: include_str!("shaders/mac_flurry/common.glsl"), buffers: vec![a, b, c, d], image, sim_height: 360 }
+    let image = Pass { code: include_str!("shaders/mac_flurry/image.glsl").to_string(), inputs: [Src::Buf(4, false), Src::None, Src::None, Src::None, Src::None], size: None };
+    Multi { common: include_str!("shaders/mac_flurry/common.glsl"), buffers: vec![field, a, b, c, d], image, sim_height: 360 }
 }
 
 pub fn pass_source(common: &str, code: &str) -> String {

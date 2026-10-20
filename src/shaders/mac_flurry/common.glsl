@@ -145,3 +145,13 @@ float fbm( in vec3 x, in int oct ){
     }
     return t;
 }
+
+// ----- noise field (not in the original): see field.glsl -----
+// The field texture (iChannel4 of the passes that use it) holds NPAN panels of GW x GH texels side by side. nf() reads
+// panel `panel` at position `uv` (0..1 over the simulation buffer) with bilinear filtering, staying inside the panel.
+const float GW = 64.0;
+const float GH = 36.0;
+const float NPAN = 11.0;
+vec4 nf(float panel, vec2 uv) {
+    return texture(iChannel4, vec2((panel + mix(0.5/GW, 1.0 - 0.5/GW, uv.x)) / NPAN, mix(0.5/GH, 1.0 - 0.5/GH, uv.y)));
+}
