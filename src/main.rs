@@ -124,8 +124,9 @@ fn quit() {
 //   through live, in both directions. No screenshot of the desktop is taken. The window is created fully transparent
 //   and is only made visible by the first alpha > 0, so there is no black first frame. Per-pixel effects (wipes, irises)
 //   are not possible this way and were dropped; blur and zoom only affect what we render, not the desktop.
-// * The window is 1 pixel shorter than the monitor: that avoids both the compositor bypass that ignores the alpha (exact
-//   size) and the shell's full-screen reaction that flashes a black bar on the taskbar (see where the window is created).
+// * The window is 1 pixel larger than the monitor (an exact monitor-sized window bypasses the compositor and its alpha has
+//   no effect) and carries the NonRudeHWND property, which stops the shell from demoting and redrawing the taskbar (a black
+//   bar along its top for ~0.4 s at start and exit). See where the window is created.
 // * The window is a tool window (WS_EX_TOOLWINDOW) so no taskbar button appears and disappears; that button used to make
 //   the taskbar re-lay itself out and flash.
 // * Screen capture (GDI, desktop duplication and Windows.Graphics.Capture were all tried) cannot see this window while
@@ -269,14 +270,12 @@ unsafe fn run(mode: Mode, cfg: Config) {
                 if std::env::var_os("WXSCR_SMALL").is_some() {
                     (wl, wt, w, h) = (400, 300, 1000, 560);
                 }
-                // One pixel short of the full monitor height, on purpose (the bottom pixel row shows what is behind us):
-                //  * a window that covers the whole monitor makes the shell react (it demotes and redraws the taskbar), which
-                //    showed up as a ~10 px black bar along the top of the taskbar for ~0.4 s at start and at exit; measured
-                //    frame by frame with Windows.Graphics.Capture, sizes of monitor+0/+1/+2 all showed it, monitor-1 in
-                //    either dimension never did, and the window still covers the taskbar;
-                //  * a window that exactly matches the monitor is also presented outside the compositor, which ignores its
-                //    alpha (no fade), so the exact size was no option for transitions either.
-                h -= 1;
+                // One pixel larger than the monitor in both directions (the extra pixel is off the right/bottom edge): a window that
+                // exactly matches the monitor is presented by the driver outside the compositor, which ignores the window's
+                // alpha, so it could not fade. Covering the screen with a window makes the shell react though (see
+                // NonRudeHWND below).
+                w += 1;
+                h += 1;
                 // topmost (also for the fullscreen test, so it can not end up behind another window) and a tool window: no
                 // taskbar button appearing and disappearing, which made the taskbar re-lay itself out and flash
                 let mut ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
@@ -287,6 +286,11 @@ unsafe fn run(mode: Mode, cfg: Config) {
                 if hwnd.is_null() {
                     continue;
                 }
+                // Tell the shell this is not a "rude" full-screen window. Without this the shell demotes the taskbar and
+                // redraws it when a window covering the monitor appears, which showed as a ~10 px black bar along the top of the
+                // taskbar for ~0.4 s at start and at exit (measured frame by frame with Windows.Graphics.Capture: gone with this
+                // property, for any window size; the window still covers the taskbar).
+                SetPropW(hwnd, wide("NonRudeHWND").as_ptr(), 1 as _);
                 if style_in != 0 {
                     SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA); // invisible until the first frame has been drawn
                 }

@@ -52,10 +52,6 @@ The heaviest ones are ray-marching shaders that really do a lot of work per pixe
 that GPU). If a background is too heavy for your GPU, set **Render resolution** in settings to 75% or 50%: the background is rendered
 smaller and scaled up while the clock text stays sharp.
 
-## Known issues
-
-- The screensaver window is one pixel shorter than the screen on purpose: a window that covers the whole monitor makes Windows redraw the taskbar with a black bar along its top at start and exit, and one that exactly matches the monitor bypasses the compositor so it cannot fade. The cost is a one-pixel strip along the very bottom edge that shows what is behind it.
-
 ## Notes
 
 - Location is detected automatically on every launch: the Windows Location Service first, then your IP address (ipwho.is). Uncheck **Detect automatically** in settings to type an override (a US zip, `City, ST` or `lat,lon`); the box is pre-filled with the detected place.
