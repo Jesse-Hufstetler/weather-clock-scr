@@ -137,5 +137,7 @@ Set-ItemProperty $desk 'SCRNSAVE.EXE' $Target
 Set-ItemProperty $desk 'ScreenSaveActive' '1'
 if (-not (Get-ItemProperty $desk).ScreenSaveTimeOut) { Set-ItemProperty $desk 'ScreenSaveTimeOut' '300' }
 
-Done "$Name $ver is installed and set as your screensaver.`nChange it in Screen Saver Settings."
+Done "$Name $ver is installed and set as your screensaver.`nThe settings window opens next; you can change them later in Screen Saver Settings."
+# straight to the settings (location, background, options) so a fresh install can be set up right away
+if (-not $Quiet) { Start-Process -FilePath $Target -ArgumentList '/c' }
 exit 0
