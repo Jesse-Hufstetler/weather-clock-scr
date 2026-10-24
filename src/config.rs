@@ -34,6 +34,8 @@ pub struct Config {
     pub brightness: u32,
     /// 0..=100: how much the text breathes/drifts (burn-in protection).
     pub movement: u32,
+    /// 10..=200 percent: how fast the background animates (applies to every background).
+    pub speed: u32,
     /// 0 = clock on every monitor, 1 = clock on primary only (others show background), 2 = clock on primary only (others black).
     pub monitors: usize,
     pub refresh_min: u32,
@@ -70,6 +72,7 @@ impl Default for Config {
             fps: 0,
             brightness: 100,
             movement: 60,
+            speed: 100,
             monitors: 0,
             refresh_min: 20,
             font: String::new(),
@@ -118,6 +121,7 @@ impl Config {
         c.fps = match nu("fps_cap", 0) { 0 => 0, n => n.clamp(10, 240) as u32 };
         c.brightness = nu("brightness", c.brightness as u64).clamp(10, 100) as u32;
         c.movement = nu("movement", c.movement as u64).min(100) as u32;
+        c.speed = nu("speed", c.speed as u64).clamp(10, 200) as u32;
         c.monitors = (nu("monitors", c.monitors as u64) as usize).min(2);
         c.refresh_min = nu("refresh_min", c.refresh_min as u64).clamp(5, 180) as u32;
         c.font = st("font", "");
@@ -144,7 +148,7 @@ impl Config {
             "place": self.place, "resolved_for": self.resolved_for,
             "fahrenheit": self.fahrenheit, "clock24": self.clock24, "seconds": self.seconds,
             "details": self.details, "background": crate::bg::index_to_id(self.background),
-            "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement,
+            "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement, "speed": self.speed,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
             "contrast": self.contrast, "render_scale": self.render_scale, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),
             "bg_options": self.bg_opts, "bg_presets": self.bg_presets,

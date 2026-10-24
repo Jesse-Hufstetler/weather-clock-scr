@@ -53,6 +53,8 @@ const ID_CONTRAST: i32 = 123;
 const ID_TRANS: i32 = 124;
 const ID_SCALE: i32 = 125;
 const ID_BGOPT: i32 = 126;
+const ID_SPEED: i32 = 127;
+const ID_SPEED_V: i32 = 128;
 /// Posted by the detection thread when `DETECT_RESULT` is ready.
 const WM_DETECTED: u32 = WM_APP + 1;
 
@@ -85,7 +87,7 @@ const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 540;
+const CONTENT_H: i32 = 568;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -224,6 +226,9 @@ unsafe fn build(panel: HWND) {
     y += 28;
     label("Clock movement", y);
     tb(ID_MOVE, ID_MOVE_V, 0, 100, cfg.movement as i32, y);
+    y += 28;
+    label("Background speed", y);
+    tb(ID_SPEED, ID_SPEED_V, 10, 200, cfg.speed as i32, y);
     y += 28;
     label("Text contrast", y);
     combo(ID_CONTRAST, &render::CONTRAST_NAMES, cfg.contrast, y, CBS_DROPDOWNLIST as u32);
@@ -435,6 +440,7 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
     cfg.render_scale = SCALE_OPTS[sel(dlg, ID_SCALE).min(2)];
     cfg.brightness = SendMessageW(item(dlg, ID_BRIGHT), TBM_GETPOS_, 0, 0) as u32;
     cfg.movement = SendMessageW(item(dlg, ID_MOVE), TBM_GETPOS_, 0, 0) as u32;
+    cfg.speed = (SendMessageW(item(dlg, ID_SPEED), TBM_GETPOS_, 0, 0) as u32).clamp(10, 200);
     cfg.contrast = sel(dlg, ID_CONTRAST).min(render::CONTRAST_NAMES.len() - 1);
     cfg.transition = sel(dlg, ID_TRANS).min(render::TRANS_NAMES.len() - 1);
     cfg.monitors = sel(dlg, ID_MON);
@@ -518,7 +524,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return 0;
         }
         WM_HSCROLL_ => {
-            for (tb, label) in [(ID_BRIGHT, ID_BRIGHT_V), (ID_MOVE, ID_MOVE_V)] {
+            for (tb, label) in [(ID_BRIGHT, ID_BRIGHT_V), (ID_MOVE, ID_MOVE_V), (ID_SPEED, ID_SPEED_V)] {
                 let v = SendMessageW(item(hwnd, tb), TBM_GETPOS_, 0, 0);
                 set_text(item(hwnd, label), &format!("{v}%"));
             }

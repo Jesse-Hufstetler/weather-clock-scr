@@ -1,9 +1,8 @@
 //! Background fragment shaders (GLSL 1.20 so they run anywhere with OpenGL 2.x+).
 //! Every shader defines `mainImage` and gets `iResolution` / `iTime` (Shadertoy-style).
 
-pub const NAMES: [&str; 14] = [
+pub const NAMES: [&str; 30] = [
     "Bubbles (SKEENSAVUH, Shadertoy)",
-    "Random gallery (SnoopethDuckDuck, Shadertoy)",
     "Frozen flame cavern (mrange, Shadertoy)",
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
     "Perhaps a screensaver (pirandello, Shadertoy)",
@@ -16,10 +15,27 @@ pub const NAMES: [&str; 14] = [
     "Ultra liquid bokeh (Weyland after iq, Shadertoy)",
     "Ice and fire (mattz, Shadertoy)",
     "Wavy background (gigaherz, Shadertoy)",
+    "Accretion (Xor, Shadertoy)",
+    "Surf 2 (Xor, Shadertoy)",
+    "Ghosts (Xor, Shadertoy)",
+    "Shooting stars (Xor, Shadertoy)",
+    "Mini: Hillside (Xor, Shadertoy)",
+    "Morphing abstract (Frostbyte, FragCoord)",
+    "Disco maze (Noztol, FragCoord)",
+    "Painted (Xor, FragCoord)",
+    "Split (Xor, FragCoord)",
+    "Truchet tunnel (Noztol, FragCoord)",
+    "Rainbow travel (Noztol, FragCoord)",
+    "Traffic (Xor, FragCoord)",
+    "Flare (Xor, FragCoord)",
+    "3D fire golf (Xor, FragCoord)",
+    "Vibrant surf (Frostbyte, FragCoord)",
+    "Stellar (Xor, FragCoord)",
+    "Disco hive (Noztol, FragCoord)",
 ];
 
 /// Stable ids stored in config.json, so adding or reordering backgrounds never changes what a saved choice means.
-pub const IDS: [&str; 14] = ["bubbles", "random_gallery", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal", "mac_flurry", "spiral_journey", "screensaver_squares", "rainbeam", "zooming_bokeh", "ultra_liquid_bokeh", "ice_and_fire", "wavy_background"];
+pub const IDS: [&str; 30] = ["bubbles", "frozen_flame", "zippy_zaps", "perhaps_a_screensaver", "hex_crystal", "mac_flurry", "spiral_journey", "screensaver_squares", "rainbeam", "zooming_bokeh", "ultra_liquid_bokeh", "ice_and_fire", "wavy_background", "accretion", "surf_2", "ghosts", "shooting_stars", "mini_hillside", "morphing_abstract", "disco_maze", "painted", "split", "truchet_tunnel", "rainbow_travel", "traffic", "flare", "fire_golf_3d", "vibrant_surf", "stellar", "disco_hive"];
 const RANDOM_ID: &str = "random";
 
 /// Config id -> index into `NAMES`; "random" maps to `NAMES.len()`, unknown ids fall back to the first background.
@@ -36,17 +52,17 @@ pub fn index_to_id(i: usize) -> &'static str {
 }
 
 /// Playback speed per background (Shadertoy shaders are often tuned faster than a screensaver wants).
-pub const TIME_SCALE: [f32; 14] = [1.0, 0.45, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+pub const TIME_SCALE: [f32; 30] = [1.0, 1.0, 0.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.6, 0.7, 0.7, 0.6, 0.6, 0.6, 0.6, 0.5, 0.7, 0.6, 0.6, 0.6, 0.6, 0.6];
 
 /// Backgrounds drawn as geometry (one additively blended quad per object) instead of one big fragment shader. Their source
 /// file is a plain fragment shader for one object, not a Shadertoy mainImage.
 pub fn is_geometry(i: usize) -> bool {
-    i == 11
+    i == 10
 }
 
 /// The objects of a geometry background for shader time `t` and buffer aspect: 8 floats each, see `bokeh_data`.
 pub fn geometry_data(i: usize, t: f32, aspect: f32) -> Vec<f32> {
-    if i == 11 { bokeh_data(t, aspect) } else { Vec::new() }
+    if i == 10 { bokeh_data(t, aspect) } else { Vec::new() }
 }
 
 /// Ultra liquid bokeh: the 128 bubbles of the original shader (position, radius, radius squared, colour as (z, y, x, 0)),
@@ -82,20 +98,13 @@ pub struct Credit {
 
 const SHADERTOY_DEFAULT: &str = "CC BY-NC-SA 3.0 (Shadertoy default; none stated by the author)";
 
-pub const CREDITS: [Credit; 14] = [
+pub const CREDITS: [Credit; 30] = [
     Credit {
         author: "Jesse Hufstetler (JesseHufstetler on Shadertoy)",
         license: "Own work",
         source: "shadertoy.com/view/l3XGRB",
         retrieved: "2026-10-19",
         changes: "Renamed a parameter called exp (it shadowed the GLSL built-in); otherwise unmodified",
-    },
-    Credit {
-        author: "SnoopethDuckDuck (fork of \"starting point 8008\")",
-        license: SHADERTOY_DEFAULT,
-        source: "shadertoy.com/view/stdSDf",
-        retrieved: "2026-10-18",
-        changes: "Unmodified code; playback slowed to 0.45x",
     },
     Credit {
         author: "mrange",
@@ -181,6 +190,125 @@ pub const CREDITS: [Credit; 14] = [
         retrieved: "2026-10-18",
         changes: "Unmodified code",
     },
+    Credit {
+        author: "Xor (@XorDev; fork of \"Surf 2 [308]\", ported from twigl)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/WcKXDV",
+        retrieved: "2026-10-24",
+        changes: "Zero-initialised z, d, i and the output (desktop GLSL does not); atan(y, x + .0001) as suggested in the Shadertoy comments, to avoid an undefined atan(0, 0); playback 0.5x",
+    },
+    Credit {
+        author: "Xor (@XorDev; fork of \"Surf [324]\", ported from twigl; based on his \"3D Fire\", shadertoy.com/view/3XXSWS)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/3fKSzc",
+        retrieved: "2026-10-24",
+        changes: "Zero-initialised z, d, i and the output (desktop GLSL does not); atan(y, x + .0001) as suggested in the Shadertoy comments, to avoid an undefined atan(0, 0); playback 0.5x",
+    },
+    Credit {
+        author: "Xor (@XorDev)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/tXlXDX",
+        retrieved: "2026-10-24",
+        changes: "zero-initialised locals and the output (desktop GLSL does not); mat2 built component by component (a driver crash workaround); playback 0.5x",
+    },
+    Credit {
+        author: "Xor (@XorDev)",
+        license: SHADERTOY_DEFAULT,
+        source: "shadertoy.com/view/ctXGRn",
+        retrieved: "2026-10-24",
+        changes: "Loop unrolled into plain statements, zero-initialised locals and the output (desktop GLSL does not); mat2 built component by component; playback 0.6x",
+    },
+    Credit {
+        author: "Xor (@XorDev; fork of \"Mini: Squircle\")",
+        license: "MIT (stated in the shader)",
+        source: "shadertoy.com/view/3fySDD",
+        retrieved: "2026-10-24",
+        changes: "Unmodified code; playback 0.7x",
+    },
+    Credit {
+        author: "@Frostbyte (ACES tonemap: shadertoy.com/view/Xc3yzM; Xor's dot noise: shadertoy.com/view/wfsyRX)",
+        license: "CC-BY-NC-SA-4.0 (stated in the shader)",
+        source: "fragcoord.xyz/s/mi99r927",
+        retrieved: "2026-10-24",
+        changes: "main() wrapped as mainImage; zero-initialised locals and the output (desktop GLSL does not); playback 0.7x",
+    },
+    Credit {
+        author: "Noztol (@noztol)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/d4a6l3bf",
+        retrieved: "2026-10-24",
+        changes: "main() wrapped as mainImage; vec2 *= mat2 written out; playback 0.6x",
+    },
+    Credit {
+        author: "Xor (@Xor)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/pz22y9ow",
+        retrieved: "2026-10-24",
+        changes: "Written in FragCoord's GOLF shorthand; the GLSL conversion FragCoord produces was used, adapted to the Shadertoy wrapper; playback 0.6x",
+    },
+    Credit {
+        author: "Xor (@Xor)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/sz0i56em",
+        retrieved: "2026-10-24",
+        changes: "Written in FragCoord's GOLF shorthand; the GLSL conversion FragCoord produces was used, adapted to the Shadertoy wrapper; round() written as floor(x + 0.5); playback 0.6x",
+    },
+    Credit {
+        author: "Noztol (@noztol)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/t7ug6jkj",
+        retrieved: "2026-10-24",
+        changes: "Audio reactivity dropped (bass and treble read as silence); main() wrapped as mainImage; round() written as floor(x + 0.5); heavy: lower the render resolution if it is slow; playback 0.6x",
+    },
+    Credit {
+        author: "Noztol (@noztol; based on fragcoord.xyz/s/fx196wc1, with Xor's colour scheme)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/rxhy4i5t",
+        retrieved: "2026-10-24",
+        changes: "main() wrapped as mainImage; playback 0.5x",
+    },
+    Credit {
+        author: "Xor (@Xor)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/rc95slen",
+        retrieved: "2026-10-24",
+        changes: "main() wrapped as mainImage; playback 0.7x",
+    },
+    Credit {
+        author: "Xor (@Xor)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/fatt9xo6",
+        retrieved: "2026-10-24",
+        changes: "Written in FragCoord's GOLF shorthand; the GLSL conversion FragCoord produces was used, adapted to the Shadertoy wrapper; mat2 built component by component; playback 0.6x",
+    },
+    Credit {
+        author: "Xor (@Xor; original: fragcoord.xyz/s/3zoe0vgo)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/3uxnauw2",
+        retrieved: "2026-10-24",
+        changes: "Written in FragCoord's GOLF shorthand; the GLSL conversion FragCoord produces was used, adapted to the Shadertoy wrapper; mat2 built component by component; playback 0.6x",
+    },
+    Credit {
+        author: "@Frostbyte (port of shadertoy.com/view/wfdGzH, a fork of Diatribes' shadertoy.com/view/w3SSWd)",
+        license: "CC-BY-NC-SA-4.0 (stated in the shader)",
+        source: "fragcoord.xyz/s/vt4k0465",
+        retrieved: "2026-10-24",
+        changes: "Audio reactivity dropped (the audio texture reads as silence); zero-initialised locals and the output (desktop GLSL does not); playback 0.6x",
+    },
+    Credit {
+        author: "Xor (@Xor)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/swl6w8ul",
+        retrieved: "2026-10-24",
+        changes: "The one-expression loop body written out as statements in the same order; main() wrapped as mainImage; playback 0.6x",
+    },
+    Credit {
+        author: "Noztol (@noztol)",
+        license: "No licence stated on the shader page (shared publicly on fragcoord.xyz); licence unverified",
+        source: "fragcoord.xyz/s/di76dy6c",
+        retrieved: "2026-10-24",
+        changes: "main() wrapped as mainImage; vec2 *= mat2 written out; playback 0.6x",
+    },
 ];
 
 /// Multi-line credit text for the settings window (\r\n for Win32 static controls).
@@ -207,7 +335,7 @@ pub fn credit_markup(i: usize) -> String {
         let tail = &word[w.len()..];
         let url = if w.starts_with("http") {
             Some(w.to_string())
-        } else if [".com/", ".io/", ".org/"].iter().any(|d| w.contains(d)) {
+        } else if [".com/", ".io/", ".org/", ".xyz/"].iter().any(|d| w.contains(d)) {
             Some(format!("https://{w}"))
         } else if shadertoy && w.len() > 3 && w.starts_with('/') && w[1..].chars().all(|c| c.is_ascii_alphanumeric()) {
             Some(format!("https://www.shadertoy.com/view{w}"))
@@ -286,14 +414,30 @@ pub fn source(i: usize) -> String {
 fn single(i: usize) -> Option<&'static str> {
     Some(match i {
         0 => BUBBLES,
-        1 => include_str!("shaders/random_gallery.glsl"),
-        2 => include_str!("shaders/frozen_flame.glsl"),
-        3 => include_str!("shaders/zippy_zaps.glsl"),
-        4 => include_str!("shaders/perhaps_a_screensaver.glsl"),
-        5 => include_str!("shaders/hex_crystal.glsl"),
-        10 => include_str!("shaders/zooming_bokeh.glsl"),
-        11 => include_str!("shaders/ultra_liquid_bokeh.glsl"),
-        13 => include_str!("shaders/wavy_background.glsl"),
+        1 => include_str!("shaders/frozen_flame.glsl"),
+        2 => include_str!("shaders/zippy_zaps.glsl"),
+        3 => include_str!("shaders/perhaps_a_screensaver.glsl"),
+        4 => include_str!("shaders/hex_crystal.glsl"),
+        9 => include_str!("shaders/zooming_bokeh.glsl"),
+        10 => include_str!("shaders/ultra_liquid_bokeh.glsl"),
+        12 => include_str!("shaders/wavy_background.glsl"),
+        13 => include_str!("shaders/accretion.glsl"),
+        14 => include_str!("shaders/surf_2.glsl"),
+        15 => include_str!("shaders/ghosts.glsl"),
+        16 => include_str!("shaders/shooting_stars.glsl"),
+        17 => include_str!("shaders/mini_hillside.glsl"),
+        18 => include_str!("shaders/morphing_abstract.glsl"),
+        19 => include_str!("shaders/disco_maze.glsl"),
+        20 => include_str!("shaders/painted.glsl"),
+        21 => include_str!("shaders/split.glsl"),
+        22 => include_str!("shaders/truchet_tunnel.glsl"),
+        23 => include_str!("shaders/rainbow_travel.glsl"),
+        24 => include_str!("shaders/traffic.glsl"),
+        25 => include_str!("shaders/flare.glsl"),
+        26 => include_str!("shaders/fire_golf_3d.glsl"),
+        27 => include_str!("shaders/vibrant_surf.glsl"),
+        28 => include_str!("shaders/stellar.glsl"),
+        29 => include_str!("shaders/disco_hive.glsl"),
         _ => return None,
     })
 }
@@ -303,16 +447,16 @@ const BUBBLES: &str = include_str!("shaders/bubbles.glsl");
 
 // ───────────── multipass (feedback) backgrounds ─────────────
 /// Flurry is not a shader: a CPU particle simulation drawn as geometry (see flurry.rs). It has options and presets.
-pub const FLURRY: usize = 6;
+pub const FLURRY: usize = 5;
 
 pub fn is_flurry(i: usize) -> bool {
     i == FLURRY
 }
 
-pub const SPIRAL: usize = 7;
-pub const RAINBEAM: usize = 9;
-pub const ICE: usize = 12;
-pub const SQUARES: usize = 8;
+pub const SPIRAL: usize = 6;
+pub const RAINBEAM: usize = 8;
+pub const ICE: usize = 11;
+pub const SQUARES: usize = 7;
 
 pub fn is_multi(i: usize) -> bool {
     i == SPIRAL || i == RAINBEAM || i == ICE || i == SQUARES

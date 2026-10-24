@@ -219,6 +219,9 @@ pub struct Renderer {
     pending: HashSet<String>,
     multi: Option<MultiState>,
     flurry: Option<FlurryState>,
+    /// Simulation clock (see `render`): advances by the elapsed wall time times the speed setting.
+    sim_clock: f64,
+    sim_prev: f64,
     sim_fbo: u32,
     trans_prog: u32,
     down_prog: u32,
@@ -451,6 +454,8 @@ impl Renderer {
             pending: HashSet::new(),
             multi: None,
             flurry: None,
+            sim_clock: 0.0,
+            sim_prev: f64::NAN,
             sim_fbo: 0,
             trans_prog,
             down_prog,
@@ -798,7 +803,7 @@ impl Renderer {
     }
 
     /// Flurry: fade the persistent buffer a little towards the background colour, then draw this frame's particles on top.
-    unsafe fn render_flurry(&mut self, f: &Frame) {
+    unsafe fn render_flurry(&mut self, f: &Frame, speed: f64) {
         let Some(mut st) = self.flurry.take() else { return };
         let p = flurry::Params::from_values(&options::values_for(f.cfg, bg::FLURRY));
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
@@ -811,7 +816,8 @@ impl Renderer {
             glClearColor(b[0], b[1], b[2], 1.0);
             glClear(GL_COLOR_BUFFER_BIT);
         }
-        let dt = if st.last_t.is_finite() && f.t >= st.last_t { (f.t - st.last_t).min(0.1) } else { 1.0 / 60.0 };
+        // the speed setting scales the simulated time step; the trail fade below follows it so trails keep their length
+        let dt = (if st.last_t.is_finite() && f.t >= st.last_t { (f.t - st.last_t).min(0.1) } else { 1.0 / 60.0 }) * speed;
         st.last_t = f.t;
         st.sim.step(dt, &p, self.fw as f64, self.fh as f64);
 
@@ -886,7 +892,7 @@ impl Renderer {
     }
 
     /// Advance the simulation (fixed 60 Hz steps) and draw the Image pass into the window-resolution buffer.
-    unsafe fn render_multi(&mut self, t: f64, sim_t: f32, tw: i32, th: i32) {
+    unsafe fn render_multi(&mut self, sim_t: f32, tw: i32, th: i32) {
         // keep the simulation's aspect in step with the window (the settings preview resizes)
         let (cur_sw, cur_sh) = match self.multi.as_ref() {
             Some(m) => (m.sw, m.sh),
@@ -899,9 +905,20 @@ impl Renderer {
         }
         let Some(mut m) = self.multi.take() else { return };
         let n = m.spec.buffers.len();
-        if t - m.last_step >= SIM_STEP - 0.001 || t < m.last_step {
-            m.last_step = t;
+        // The simulation steps once per 1/60 s of simulation time, so the speed setting slows (or quickens) the feedback
+        // itself, not just the clock the shaders read. A few steps per frame are allowed to keep up with speeds above 1x.
+        let st = sim_t as f64;
+        let behind = st - m.last_step;
+        let (steps, first_t) = if !(0.0..=0.25).contains(&behind) {
+            (1, st - SIM_STEP)
+        } else {
+            (((behind + 0.001) / SIM_STEP).floor().min(4.0) as u32, m.last_step)
+        };
+        if steps > 0 {
+            m.last_step = if steps >= 4 || !(0.0..=0.25).contains(&behind) { st } else { first_t + steps as f64 * SIM_STEP };
             (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.sim_fbo);
+          for s in 0..steps {
+            let step_t = (first_t + (s + 1) as f64 * SIM_STEP) as f32;
             for k in 0..n {
                 let write = 1 - m.read[k];
                 (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, m.tex[k][write], 0);
@@ -910,7 +927,7 @@ impl Renderer {
                 glViewport(0, 0, m.bsize[k].0, m.bsize[k].1);
                 (self.gl.Uniform2f)(gl::uloc(&self.gl, prog, "wx_res"), m.bsize[k].0 as f32, m.bsize[k].1 as f32);
                 (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "wx_aspect"), m.sw as f32 / m.sh as f32);
-                (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), sim_t);
+                (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTime"), step_t);
                 (self.gl.Uniform1f)(gl::uloc(&self.gl, prog, "iTimeDelta"), SIM_STEP as f32);
                 self.bind_inputs(&m, &m.spec.buffers[k].inputs, prog);
                 Self::quad(-1.0, -1.0, 1.0, 1.0, false);
@@ -920,6 +937,7 @@ impl Renderer {
                     (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
                 }
             }
+          }
         }
         // Image pass -> the same offscreen buffer single-pass backgrounds use (then blit + text as usual)
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
@@ -976,13 +994,18 @@ impl Renderer {
         }
         glDisable(GL_BLEND);
         // 1. background -> offscreen
-        let sim_t = (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)];
+        // simulation time = wall time scaled by the user's speed setting; accumulated so moving the slider never makes it jump
+        let speed = f.cfg.speed.clamp(10, 200) as f64 / 100.0;
+        let dt = f.t - self.sim_prev;
+        self.sim_clock = if self.sim_prev.is_finite() && (0.0..=0.25).contains(&dt) { self.sim_clock + dt * speed } else { f.t * speed };
+        self.sim_prev = f.t;
+        let sim_t = (self.sim_clock as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)];
         if self.flurry.is_some() {
-            self.render_flurry(f);
+            self.render_flurry(f, speed);
         } else if bg::is_geometry(f.bg) && self.multi.is_none() {
             self.render_geometry(f.bg, sim_t);
         } else if self.multi.is_some() {
-            self.render_multi(f.t, sim_t, tw, th);
+            self.render_multi(sim_t, tw, th);
         } else {
             (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
             glViewport(0, 0, self.fw, self.fh);
