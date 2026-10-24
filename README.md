@@ -52,6 +52,12 @@ The heaviest ones are ray-marching shaders that really do a lot of work per pixe
 that GPU). If a background is too heavy for your GPU, set **Render resolution** in settings to 75% or 50%: the background is rendered
 smaller and scaled up while the clock text stays sharp.
 
+## When Windows starts the screensaver itself
+
+Windows runs an idle-started screensaver on its own empty "Screen-saver" desktop, where there is nothing to fade over and from which a process cannot switch back to yours. So the saver does not stay there: it asks the Task Scheduler (a one-off on-demand task, `WeatherClockScreensaverHandoff`, running a copy at `%APPDATA%\wxscr\wxscr-handoff.exe`) to start a copy on your real desktop and exits at once; Windows switches back about a third of a second later and the copy fades in and out over your live windows, exactly as when started from the Test button. Only one saver runs at a time. If the hand-off fails, the saver falls back to staying on the empty desktop: it fades in from black and fades out to a picture of your desktop assembled from your windows (refreshed every minute). A side effect of the hand-off is that Windows sees the saver end right away, so "On resume, display logon screen" no longer locks the PC.
+
+The saver keeps a small diagnostic log in `%APPDATA%\wxscr\saver.log` (window messages that can end a run, a timeline of the fade-out, frame stalls and a heartbeat every 5 minutes); attach it when reporting a problem that only happens after it has been running a long time.
+
 ## Notes
 
 - Location is detected automatically on every launch: the Windows Location Service first, then your IP address (ipwho.is). Uncheck **Detect automatically** in settings to type an override (a US zip, `City, ST` or `lat,lon`); the box is pre-filled with the detected place.

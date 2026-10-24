@@ -62,6 +62,8 @@ if ($Uninstall) {
     Stop-Running
     Remove-OldCopies
     Clear-ActiveIfOurs
+    schtasks /delete /f /tn WeatherClockScreensaverHandoff 2>&1 | Out-Null
+    Remove-Item "$env:APPDATA\wxscr\wxscr-handoff.exe" -Force -ErrorAction SilentlyContinue
     Remove-Item $UninstKey -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $Keep) {
         # the uninstaller is this script; delete the folder after we exit

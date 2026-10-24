@@ -1,6 +1,6 @@
 [package]
 name = "wxscr"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 edition = "2021"
 description = "Weather-consensus clock screensaver (.scr) with OpenGL backgrounds"
 
@@ -12,10 +12,15 @@ windows = { version = "0.62.2", features = ["Devices_Geolocation", "Foundation",
 version = "0.61"
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_OpenGL",
     "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Storage_Xps",
     "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_StationsAndDesktops",
     "Win32_System_SystemInformation",
     "Win32_System_Time",
     "Win32_System_Threading",

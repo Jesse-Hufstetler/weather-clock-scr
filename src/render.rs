@@ -149,6 +149,8 @@ struct Locs {
     tr_scene: i32,
     tr_small: i32,
     tr_dark: i32,
+    tr_outside: i32,
+    tr_have: i32,
     tr_p: i32,
     tr_style: i32,
     tr_res: i32,
@@ -218,6 +220,10 @@ pub struct Renderer {
     sc_w: i32,
     sc_h: i32,
     hwnd: HWND,
+    /// A picture of the user's desktop (see desktopshot.rs) and whether the fade should go to it right now.
+    out_tex: u32,
+    pub out_have: bool,
+    pub out_use: bool,
     /// The window is WS_EX_LAYERED: fades go through its alpha so the real desktop shows through.
     layered: bool,
     alpha: i32,
@@ -305,7 +311,7 @@ void main(){
 /// blurs or zooms what we rendered; `dark` is 1 where there is no layered window (the settings preview) and then also
 /// fades to black here.
 const TRANS_FS: &str = "#version 120
-uniform sampler2D scene; uniform sampler2D small; uniform float p; uniform int style; uniform float dark; uniform vec2 res; varying vec2 uv;
+uniform sampler2D scene; uniform sampler2D small; uniform sampler2D outside; uniform float have; uniform float p; uniform int style; uniform float dark; uniform vec2 res; varying vec2 uv;
 float ease(float x){ x = clamp(x, 0.0, 1.0); return x*x*x*(x*(x*6.0-15.0)+10.0); }
 vec3 B(vec2 c){ return texture2D(scene, clamp(c, 0.0, 1.0)).rgb; }
 vec3 S(vec2 c){ return texture2D(small, clamp(c, 0.0, 1.0)).rgb; } // quarter-resolution blurred copy (style 2)
@@ -324,7 +330,9 @@ void main(){
   } else {
     c = B(uv);
   }
-  c *= mix(1.0, e, dark);
+  // without a layered window the fade goes to a picture of the user's desktop when one is loaded, else to black
+  vec3 other = have > 0.5 ? texture2D(outside, uv).rgb : vec3(0.0);
+  c = mix(other, c, mix(1.0, e, dark));
   gl_FragColor = vec4(c, 1.0);
 }";
 
@@ -376,6 +384,8 @@ impl Renderer {
             tr_scene: gl::uloc(&g, trans_prog, "scene"),
             tr_small: gl::uloc(&g, trans_prog, "small"),
             tr_dark: gl::uloc(&g, trans_prog, "dark"),
+            tr_outside: gl::uloc(&g, trans_prog, "outside"),
+            tr_have: gl::uloc(&g, trans_prog, "have"),
             tr_p: gl::uloc(&g, trans_prog, "p"),
             tr_style: gl::uloc(&g, trans_prog, "style"),
             tr_res: gl::uloc(&g, trans_prog, "res"),
@@ -439,11 +449,28 @@ impl Renderer {
             sc_w: 0,
             sc_h: 0,
             hwnd,
+            out_tex: 0,
+            out_have: false,
+            out_use: false,
             layered: GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED != 0,
             alpha: -1,
         };
         r.ensure_fbo(w, h);
         Ok(r)
+    }
+
+    /// First pending OpenGL error (0 = none); for the diagnostic log.
+    pub unsafe fn gl_error(&self) -> u32 {
+        glGetError()
+    }
+
+    /// Driver identification for the diagnostic log.
+    pub unsafe fn driver_info(&self) -> String {
+        let s = |n: u32| {
+            let p = glGetString(n);
+            if p.is_null() { String::from("?") } else { std::ffi::CStr::from_ptr(p as *const _).to_string_lossy().into_owned() }
+        };
+        format!("{} | {} | {}", s(GL_VENDOR), s(GL_RENDERER), s(GL_VERSION))
     }
 
     /// Swap the text font (settings preview); cached glyph runs are rebuilt on the next frame.
@@ -453,6 +480,23 @@ impl Renderer {
         self.keys = Default::default();
         self.ready.clear();
         self.pending.clear();
+    }
+
+    /// Load a picture of the user's desktop (bottom-up BGRA, like an OpenGL texture) for the fade-out to end on.
+    pub unsafe fn set_outside(&mut self, w: i32, h: i32, bgra: &[u8]) {
+        const GL_BGRA: u32 = 0x80E1;
+        wglMakeCurrent(self.hdc, self.rc);
+        if self.out_tex == 0 {
+            glGenTextures(1, &mut self.out_tex);
+        }
+        glBindTexture(GL_TEXTURE_2D, self.out_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA as i32, w, h, 0, GL_BGRA, GL_UNSIGNED_BYTE, bgra.as_ptr() as *const _);
+        self.out_have = true;
     }
 
     /// Quarter-resolution targets for the blur transition: [0] the shrunk scene, [1] its blur.
@@ -897,6 +941,11 @@ impl Renderer {
             (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
             glBindTexture(GL_TEXTURE_2D, if f.tstyle == 2 { self.bl_tex[1] } else { self.sc_tex });
             (self.gl.Uniform1i)(self.loc.tr_small, 1);
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + 2);
+            glBindTexture(GL_TEXTURE_2D, self.out_tex);
+            (self.gl.Uniform1i)(self.loc.tr_outside, 2);
+            (self.gl.Uniform1f)(self.loc.tr_have, if self.out_have && self.out_use { 1.0 } else { 0.0 });
+            (self.gl.ActiveTexture)(gl::TEXTURE0 + 1);
             (self.gl.ActiveTexture)(gl::TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, self.sc_tex);
             (self.gl.Uniform1i)(self.loc.tr_scene, 0);
