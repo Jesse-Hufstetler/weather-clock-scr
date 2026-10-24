@@ -29,7 +29,7 @@ function Done($m) {
 
 function Stop-Running {
     # a running .scr locks the file; stop any wxscr / Weather Clock instance
-    Get-Process | Where-Object { $_.ProcessName -in 'wxscr','Weather Clock' } |
+    Get-Process | Where-Object { $_.ProcessName -in 'wxscr','Weather Clock','wxscr-handoff' } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
 }
@@ -44,6 +44,28 @@ function Remove-OldCopies {
     )
     foreach ($f in $candidates) {
         if (Test-Path -LiteralPath $f) { Say "Removing old version: $f"; Remove-Item -LiteralPath $f -Force }
+    }
+}
+
+# The saver hands over to a helper copy on the user's real desktop (see README, "When Windows starts the screensaver itself").
+# The task that starts it is registered here and nowhere else: it has no trigger and only runs when the saver asks.
+$TaskName = 'WeatherClockScreensaverHandoff'
+
+function Remove-HandoffTask {
+    schtasks /delete /f /tn $TaskName 2>&1 | Out-Null
+    # earlier versions kept the helper in the user's profile and registered the task from the saver itself
+    Remove-Item "$env:APPDATA\wxscr\wxscr-handoff.exe" -Force -ErrorAction SilentlyContinue
+}
+
+function Add-HandoffTask {
+    try {
+        # the Task Scheduler will not start a .scr, so the helper is a copy of the saver with an .exe name
+        $action    = New-ScheduledTaskAction -Execute (Join-Path $Keep 'wxscr-handoff.exe') -Argument '/s handoff'
+        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+    } catch {
+        Say "Could not register the hand-off task ($($_.Exception.Message)). The screensaver still works; it just fades out differently when Windows starts it."
     }
 }
 
@@ -62,8 +84,7 @@ if ($Uninstall) {
     Stop-Running
     Remove-OldCopies
     Clear-ActiveIfOurs
-    schtasks /delete /f /tn WeatherClockScreensaverHandoff 2>&1 | Out-Null
-    Remove-Item "$env:APPDATA\wxscr\wxscr-handoff.exe" -Force -ErrorAction SilentlyContinue
+    Remove-HandoffTask
     Remove-Item $UninstKey -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $Keep) {
         # the uninstaller is this script; delete the folder after we exit
@@ -88,6 +109,11 @@ Copy-Item -LiteralPath $src -Destination $Target -Force
 # keep a copy of this script as the uninstaller
 New-Item -ItemType Directory -Force $Keep | Out-Null
 Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $Keep 'install.ps1') -Force
+
+# the hand-off helper (a copy of the saver with an .exe name) and the on-demand task that starts it
+Remove-HandoffTask
+Copy-Item -LiteralPath $src -Destination (Join-Path $Keep 'wxscr-handoff.exe') -Force
+Add-HandoffTask
 
 # Add/Remove Programs entry (overwritten on every upgrade)
 New-Item $UninstKey -Force | Out-Null

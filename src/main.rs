@@ -627,40 +627,36 @@ enum Mode {
 
 /// When Windows starts the screensaver itself it does so on a separate, empty "Screen-saver" desktop, which can be neither
 /// faded over (nothing is behind the window) nor left (SwitchDesktop is refused). The desktop does go away when the
-/// process exits though, so: start a copy of ourselves on the user's "Default" desktop and exit at once. Windows then
-/// switches back, and the copy (see wait_for_default_desktop) puts up its window there as if the saver had been started
-/// from the settings dialog, with a real alpha fade over the live desktop. Returns false if the copy could not be started.
+/// process exits though, so: have the Task Scheduler start the installed helper copy on the user's "Default" desktop and
+/// exit at once. Windows then switches back, and the helper (see wait_for_default_desktop) puts up its window there as if
+/// the saver had been started from the settings dialog, with a real alpha fade over the live desktop. Returns false if the
+/// helper or its task is not installed or could not be started, and the saver then carries on here with its fallback.
+///
+/// Both the helper (`wxscr-handoff.exe` in the install folder, a copy of the saver because the Task Scheduler will not start
+/// a .scr) and the on-demand task `WeatherClockScreensaverHandoff` are put there by the installer and removed by the
+/// uninstaller; the saver itself only asks for the task to run and never writes files or registers anything.
 unsafe fn handoff() -> bool {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
     // Windows keeps the saver's desktop alive while any process of the saver's job exists, and the job forbids breakaway
     // (tested), so a plain child would keep us on the Screen-saver desktop. The Task Scheduler starts processes outside of
-    // it, and "/it" puts them on the user's interactive desktop.
-    let schtasks = |args: &[&str]| Command::new("schtasks").args(args).creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */).output().map(|o| o.status.success()).unwrap_or(false);
-    let task = "WeatherClockScreensaverHandoff";
-    // The task scheduler will not start a .scr itself, and wrapping it in cmd.exe flashes a console window over the desktop,
-    // so the task runs a copy of ourselves named .exe (refreshed here; if the old copy is still running, keep using it).
-    let copy = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("wxscr").join("wxscr-handoff.exe");
-    let _ = std::fs::create_dir_all(copy.parent().unwrap());
-    let _ = std::fs::copy(&exe, &copy);
-    if !copy.exists() {
+    // it, and its "interactive" logon type puts them on the user's own desktop.
+    let helper = std::path::PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_default()).join("Weather Clock").join("wxscr-handoff.exe");
+    if !helper.exists() {
+        diag::log("no hand-off helper installed (run the installer to get it): staying on this desktop");
         return false;
     }
-    let cmd = format!("\"{}\" /s handoff", copy.display());
-    // (re)registered every time so it always points at the exe that is running; it only ever runs on demand
-    if !schtasks(&["/create", "/f", "/tn", task, "/tr", &cmd, "/sc", "once", "/st", "00:00", "/it", "/rl", "limited"]) {
-        diag::log("could not register the hand-off task");
-        return false;
-    }
-    if !schtasks(&["/run", "/tn", task]) {
+    let started = Command::new("schtasks")
+        .args(["/run", "/tn", "WeatherClockScreensaverHandoff"])
+        .creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !started {
         diag::log("could not run the hand-off task");
         return false;
     }
-    diag::log("handed over to a copy started by the task scheduler on the Default desktop");
+    diag::log("handed over to the helper started by the task scheduler on the Default desktop");
     true
 }
 
