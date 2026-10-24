@@ -2,6 +2,8 @@
 
 use crate::bg;
 use crate::config::Config;
+use crate::options::{self, Kind, Options, Param, Values};
+use std::collections::BTreeMap;
 use crate::render::{self, Frame, Renderer};
 use crate::weather::{self, Weather};
 use std::cell::{Cell, RefCell};
@@ -12,6 +14,7 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -49,6 +52,7 @@ const ID_AUTO: i32 = 122;
 const ID_CONTRAST: i32 = 123;
 const ID_TRANS: i32 = 124;
 const ID_SCALE: i32 = 125;
+const ID_BGOPT: i32 = 126;
 /// Posted by the detection thread when `DETECT_RESULT` is ready.
 const WM_DETECTED: u32 = WM_APP + 1;
 
@@ -81,7 +85,7 @@ const ID_TIMER: usize = 1;
 /// Design-unit (96 dpi) geometry. The options panel is fixed-width and scrolls when the window is short;
 /// the preview takes whatever room is left, keeping 16:9.
 const PANEL_W: i32 = 470;
-const CONTENT_H: i32 = 508;
+const CONTENT_H: i32 = 540;
 const BUTTON_ROW_H: i32 = 46;
 const MIN_PREVIEW_W: i32 = 240;
 const MARGIN: i32 = 14;
@@ -96,6 +100,9 @@ static TEST_RUN: Mutex<Option<std::process::Child>> = Mutex::new(None);
 static DETECT_RESULT: Mutex<Option<Result<weather::Detected, String>>> = Mutex::new(None);
 
 thread_local! {
+    static OPT: RefCell<Option<OptState>> = const { RefCell::new(None) };
+    static OPTWIN: Cell<isize> = const { Cell::new(0) };
+    static OPTPANEL: Cell<isize> = const { Cell::new(0) };
     static ST: RefCell<Option<State>> = const { RefCell::new(None) };
     static PANEL: Cell<isize> = const { Cell::new(0) };
     static PREV: Cell<isize> = const { Cell::new(0) };
@@ -197,6 +204,9 @@ unsafe fn build(panel: HWND) {
     label("Background", y);
     combo(ID_BG, &names, cfg.background.min(names.len() - 1), y, CBS_DROPDOWNLIST as u32);
     y += 30;
+    let has_opts = options::for_bg(cfg.background).is_some();
+    mk("BUTTON", "Background options and presets\u{2026}", BS_PUSHBUTTON as u32 | WS_TABSTOP | if has_opts { 0 } else { WS_DISABLED }, 0, cx, y, 280, 24, ID_BGOPT);
+    y += 32;
     label("Frame rate", y);
     combo(ID_FPS, &FPS_NAMES, FPS_OPTS.iter().position(|f| *f == cfg.fps).unwrap_or(0), y, CBS_DROPDOWNLIST as u32);
     y += 30;
@@ -250,6 +260,26 @@ unsafe fn build_footer(dlg: HWND) {
     mk("BUTTON", "Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, IDCANCEL);
 }
 
+/// Give a scrolling panel a vertical scroll range for `content_h` pixels of content in a `page_h` pixel high window,
+/// keeping the current position as far as the new range allows.
+unsafe fn update_scroll(panel: HWND, content_h: i32, page_h: i32) {
+    let mut si: SCROLLINFO = std::mem::zeroed();
+    si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+    si.fMask = SIF_POS;
+    GetScrollInfo(panel, SB_VERT, &mut si);
+    let old_pos = si.nPos;
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    si.nMin = 0;
+    si.nMax = content_h - 1;
+    si.nPage = page_h as u32;
+    SetScrollInfo(panel, SB_VERT, &si, 1);
+    si.fMask = SIF_POS;
+    GetScrollInfo(panel, SB_VERT, &mut si);
+    if si.nPos != old_pos {
+        ScrollWindowEx(panel, 0, old_pos - si.nPos, null(), null(), null_mut(), null_mut(), SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    }
+}
+
 /// Position panel, preview and footer for the current client size; resize the preview renderer to match.
 unsafe fn layout(dlg: HWND) {
     let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
@@ -266,21 +296,7 @@ unsafe fn layout(dlg: HWND) {
     // options panel (left): fixed width, scrolls vertically when the window is shorter than its content
     let panel_h = (ch - btn_h).max(sc(60));
     MoveWindow(panel, 0, 0, sc(PANEL_W), panel_h, 1);
-    let mut si: SCROLLINFO = std::mem::zeroed();
-    si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
-    si.fMask = SIF_POS;
-    GetScrollInfo(panel, SB_VERT, &mut si);
-    let old_pos = si.nPos;
-    si.fMask = SIF_RANGE | SIF_PAGE;
-    si.nMin = 0;
-    si.nMax = sc(CONTENT_H) - 1;
-    si.nPage = panel_h as u32;
-    SetScrollInfo(panel, SB_VERT, &si, 1);
-    si.fMask = SIF_POS;
-    GetScrollInfo(panel, SB_VERT, &mut si);
-    if si.nPos != old_pos {
-        ScrollWindowEx(panel, 0, old_pos - si.nPos, null(), null(), null_mut(), null_mut(), SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
-    }
+    update_scroll(panel, sc(CONTENT_H), panel_h);
     // preview (right): 16:9, as large as fits
     let rx = sc(PANEL_W + 8);
     let (top, caption_h) = (sc(MARGIN), sc(26) + sc(CREDIT_H));
@@ -336,6 +352,8 @@ unsafe extern "system" fn panel_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
     let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
     match msg {
         WM_COMMAND | WM_HSCROLL_ => return SendMessageW(GetParent(hwnd), msg, wp, lp),
+        // the colour swatches of the options window paint themselves in their colour
+        WM_CTLCOLORSTATIC if GetParent(hwnd) as isize == OPTWIN.with(|c| c.get()) => return SendMessageW(GetParent(hwnd), msg, wp, lp),
         WM_VSCROLL => {
             let line = 24 * dpi / 96;
             let code = (wp & 0xFFFF) as i32;
@@ -523,6 +541,11 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                     }
                 }
                 ID_ABOUT => show_credits(hwnd),
+                ID_BGOPT => open_options(hwnd),
+                ID_BG if (wp >> 16) & 0xFFFF == 1 /* CBN_SELCHANGE */ => {
+                    close_options();
+                    EnableWindow(item(hwnd, ID_BGOPT), options::for_bg(sel(hwnd, ID_BG)).is_some() as i32);
+                }
                 ID_TRANS if (wp >> 16) & 0xFFFF == 1 /* CBN_SELCHANGE */ => {
                     ST.with(|s| {
                         let mut s = s.borrow_mut();
@@ -711,6 +734,475 @@ unsafe fn tick(dlg: HWND) {
             set_text(GetDlgItem(dlg, ID_CREDIT), &text);
         }
     });
+}
+
+// ───────────── background options and presets window ─────────────
+// Built entirely from the background's `Options` declaration (options.rs), so a new background with options needs no
+// dialog code. Every change is written straight into the dialog's config, so the live preview shows it at once; OK keeps
+// it, Cancel puts the values and saved presets back as they were when the window opened.
+
+const ID_O_PRESET: i32 = 900;
+const ID_O_SAVE: i32 = 901;
+const ID_O_DELETE: i32 = 902;
+const ID_O_PARAM: i32 = 1000;
+const ID_O_VALUE: i32 = 1500;
+const OPT_PANEL_W: i32 = 500;
+const OPT_TOP_H: i32 = 46;
+const OPT_BOTTOM_H: i32 = 46;
+const CB_RESETCONTENT_: u32 = 0x014B;
+const SS_NOTIFY_: u32 = 0x0100;
+const TRACK_STEPS: f64 = 1000.0;
+
+struct OptState {
+    bg: usize,
+    opts: &'static Options,
+    /// Built-in presets first, then the user's: name, complete values, built-in?
+    presets: Vec<(String, Values, bool)>,
+    /// Values and saved presets as they were on opening, for Cancel.
+    snapshot: (Option<Values>, Option<BTreeMap<String, Values>>),
+    brushes: Vec<(u32, HBRUSH)>,
+    bold: HFONT,
+    content_h: i32,
+}
+
+fn opt_with<R>(f: impl FnOnce(&mut OptState) -> R) -> R {
+    OPT.with(|o| f(o.borrow_mut().as_mut().expect("options window state")))
+}
+
+fn cfg_with<R>(f: impl FnOnce(&mut Config) -> R) -> R {
+    ST.with(|s| f(&mut s.borrow_mut().as_mut().expect("dialog state").cfg))
+}
+
+fn opt_current() -> Values {
+    let bg = opt_with(|o| o.bg);
+    cfg_with(|c| options::values_for(c, bg))
+}
+
+fn opt_store(vals: Values) {
+    let bg = opt_with(|o| o.bg);
+    cfg_with(|c| c.bg_opts.insert(crate::bg::index_to_id(bg).to_string(), vals));
+}
+
+fn preset_list(opts: &Options, cfg: &Config, bg: usize) -> Vec<(String, Values, bool)> {
+    let mut v: Vec<_> = opts.presets.iter().map(|p| (p.name.to_string(), opts.preset_values(p), true)).collect();
+    if let Some(named) = cfg.bg_presets.get(crate::bg::index_to_id(bg)) {
+        v.extend(named.iter().map(|(n, vals)| (n.clone(), opts.resolve(vals), false)));
+    }
+    v
+}
+
+fn fmt_value(p: &Param, v: f64) -> String {
+    match p.kind {
+        Kind::Int(..) => format!("{}", v as i64),
+        Kind::Float(lo, hi) if hi - lo <= 2.0 => format!("{v:.2}"),
+        Kind::Float(lo, hi) if hi - lo <= 50.0 => format!("{v:.1}"),
+        Kind::Float(..) => format!("{v:.0}"),
+        Kind::Color => format!("#{:06x}", v as u32),
+        Kind::Choice(c) => c[(v as usize).min(c.len() - 1)].to_string(),
+        Kind::Bool => String::new(),
+    }
+}
+
+/// 0xRRGGBB <-> COLORREF (0x00BBGGRR)
+fn to_colorref(rgb: u32) -> u32 {
+    ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+}
+
+unsafe fn opt_item(id: i32) -> HWND {
+    GetDlgItem(OPTPANEL.with(|c| c.get()) as HWND, id)
+}
+
+/// Point every control at `vals`.
+unsafe fn opt_load_controls(vals: &Values) {
+    let opts = opt_with(|o| o.opts);
+    for (i, p) in opts.params.iter().enumerate() {
+        let v = vals[p.key];
+        let h = opt_item(ID_O_PARAM + i as i32);
+        match p.kind {
+            Kind::Float(lo, hi) => {
+                SendMessageW(h, TBM_SETPOS_, 1, ((v - lo) / (hi - lo) * TRACK_STEPS).round() as isize);
+            }
+            Kind::Int(..) => {
+                SendMessageW(h, TBM_SETPOS_, 1, v as isize);
+            }
+            Kind::Bool => {
+                SendMessageW(h, BM_SETCHECK_, (v != 0.0) as usize, 0);
+            }
+            Kind::Choice(_) => {
+                SendMessageW(h, CB_SETCURSEL_, v as usize, 0);
+            }
+            Kind::Color => {
+                InvalidateRect(h, null(), 1);
+            }
+        }
+        if !matches!(p.kind, Kind::Bool | Kind::Choice(_)) {
+            set_text(opt_item(ID_O_VALUE + i as i32), &fmt_value(p, v));
+        }
+    }
+}
+
+/// Show which preset the current values are (or "Custom").
+unsafe fn opt_show_preset() {
+    let cur = opt_current();
+    let hit = opt_with(|o| o.presets.iter().position(|(_, v, _)| options::same(o.opts, v, &cur)));
+    let combo = GetDlgItem(OPTWIN.with(|c| c.get()) as HWND, ID_O_PRESET);
+    SendMessageW(combo, CB_SETCURSEL_, hit.map_or(usize::MAX, |i| i), 0);
+    if hit.is_none() {
+        set_text(combo, "Custom");
+    }
+    let user = hit.map_or(false, |i| !opt_with(|o| o.presets[i].2));
+    EnableWindow(GetDlgItem(OPTWIN.with(|c| c.get()) as HWND, ID_O_DELETE), user as i32);
+}
+
+unsafe fn opt_fill_presets() {
+    let combo = GetDlgItem(OPTWIN.with(|c| c.get()) as HWND, ID_O_PRESET);
+    SendMessageW(combo, CB_RESETCONTENT_, 0, 0);
+    let names: Vec<String> = opt_with(|o| o.presets.iter().map(|p| p.0.clone()).collect());
+    for n in &names {
+        SendMessageW(combo, CB_ADDSTRING_, 0, wide(n).as_ptr() as isize);
+    }
+    opt_show_preset();
+}
+
+unsafe fn opt_set_param(i: usize, v: f64) {
+    let opts = opt_with(|o| o.opts);
+    let p = &opts.params[i];
+    let v = p.clamp(v);
+    let mut vals = opt_current();
+    vals.insert(p.key.to_string(), v);
+    opt_store(vals);
+    if !matches!(p.kind, Kind::Bool | Kind::Choice(_)) {
+        set_text(opt_item(ID_O_VALUE + i as i32), &fmt_value(p, v));
+    }
+    opt_show_preset();
+}
+
+unsafe fn opt_build(win: HWND) {
+    let (dpi, font) = ST.with(|s| {
+        let s = s.borrow();
+        let s = s.as_ref().unwrap();
+        (s.dpi, s.font)
+    });
+    let sc = |v: i32| v * dpi / 96;
+    let hinst = GetModuleHandleW(null());
+    let mk = |parent: HWND, f: HFONT, class: &str, text: &str, style: u32, ex: u32, x: i32, y: i32, w: i32, h: i32, id: i32| -> HWND {
+        let hw = CreateWindowExW(ex, wide(class).as_ptr(), wide(text).as_ptr(), WS_CHILD | WS_VISIBLE | style, sc(x), sc(y), sc(w), sc(h), parent, id as isize as HMENU, hinst, null());
+        SendMessageW(hw, WM_SETFONT, f as usize, 1);
+        hw
+    };
+    // top bar: preset chooser
+    mk(win, font, "STATIC", "Preset", 0, 0, 12, 15, 52, 18, 0);
+    mk(win, font, "COMBOBOX", "", CBS_DROPDOWN as u32 | WS_VSCROLL | WS_TABSTOP, 0, 66, 11, 250, 240, ID_O_PRESET);
+    mk(win, font, "BUTTON", "Save", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, 324, 10, 72, 24, ID_O_SAVE);
+    mk(win, font, "BUTTON", "Delete", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, 402, 10, 72, 24, ID_O_DELETE);
+    mk(win, font, "BUTTON", "OK", BS_DEFPUSHBUTTON as u32 | WS_TABSTOP, 0, 0, 0, 10, 10, IDOK);
+    mk(win, font, "BUTTON", "Cancel", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, 0, 0, 10, 10, IDCANCEL);
+
+    let panel = CreateWindowExW(WS_EX_CONTROLPARENT, wide("WxScrPanel").as_ptr(), null(), WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN, 0, 0, 10, 10, win, null_mut(), hinst, null());
+    OPTPANEL.with(|c| c.set(panel as isize));
+    let (opts, bold) = opt_with(|o| (o.opts, o.bold));
+    let vals = opt_current();
+    let mut y = 10;
+    let mut group = "";
+    for (i, p) in opts.params.iter().enumerate() {
+        if p.group != group {
+            group = p.group;
+            y += if y > 10 { 8 } else { 0 };
+            mk(panel, bold, "STATIC", p.group, 0, 0, 12, y, 300, 18, 0);
+            y += 24;
+        }
+        let id = ID_O_PARAM + i as i32;
+        let vid = ID_O_VALUE + i as i32;
+        let v = vals[p.key];
+        let label = |t: &str| {
+            mk(panel, font, "STATIC", t, 0, 0, 12, y + 3, 178, 18, 0);
+        };
+        match p.kind {
+            Kind::Float(..) | Kind::Int(..) => {
+                label(p.label);
+                let (lo, hi) = match p.kind {
+                    Kind::Float(..) => (0, TRACK_STEPS as i32),
+                    _ => (p.range().0 as i32, p.range().1 as i32),
+                };
+                let h = mk(panel, font, "msctls_trackbar32", "", (TBS_HORZ | TBS_NOTICKS) as u32 | WS_TABSTOP, 0, 188, y, 232, 24, id);
+                SendMessageW(h, TBM_SETRANGE_, 1, ((hi << 16) | lo) as isize);
+                mk(panel, font, "STATIC", &fmt_value(p, v), 0, 0, 426, y + 3, 64, 18, vid);
+            }
+            Kind::Bool => {
+                let h = mk(panel, font, "BUTTON", p.label, BS_AUTOCHECKBOX as u32 | WS_TABSTOP, 0, 12, y, 400, 20, id);
+                SendMessageW(h, BM_SETCHECK_, (v != 0.0) as usize, 0);
+            }
+            Kind::Choice(names) => {
+                label(p.label);
+                let h = mk(panel, font, "COMBOBOX", "", CBS_DROPDOWNLIST as u32 | WS_VSCROLL | WS_TABSTOP, 0, 196, y, 230, 240, id);
+                for n in names {
+                    SendMessageW(h, CB_ADDSTRING_, 0, wide(n).as_ptr() as isize);
+                }
+            }
+            Kind::Color => {
+                label(p.label);
+                mk(panel, font, "STATIC", "", WS_BORDER | SS_NOTIFY_, 0, 196, y, 70, 22, id);
+                mk(panel, font, "STATIC", &fmt_value(p, v), 0, 0, 274, y + 3, 120, 18, vid);
+            }
+        }
+        y += 30;
+    }
+    opt_with(|o| o.content_h = y + 10);
+    opt_load_controls(&vals);
+    opt_fill_presets();
+}
+
+unsafe fn opt_layout(win: HWND) {
+    let dpi = ST.with(|s| s.borrow().as_ref().map(|s| s.dpi)).unwrap_or(96);
+    let sc = |v: i32| v * dpi / 96;
+    let mut rc: RECT = std::mem::zeroed();
+    GetClientRect(win, &mut rc);
+    let (cw, ch) = (rc.right, rc.bottom);
+    let (top, bottom) = (sc(OPT_TOP_H), sc(OPT_BOTTOM_H));
+    let panel = OPTPANEL.with(|c| c.get()) as HWND;
+    if panel.is_null() {
+        return;
+    }
+    let page = (ch - top - bottom).max(sc(40));
+    MoveWindow(panel, 0, top, cw, page, 1);
+    update_scroll(panel, sc(opt_with(|o| o.content_h)), page);
+    let by = ch - bottom + sc(10);
+    MoveWindow(GetDlgItem(win, IDCANCEL), cw - sc(14) - sc(100), by, sc(100), sc(26), 1);
+    MoveWindow(GetDlgItem(win, IDOK), cw - sc(14) - sc(100) - sc(10) - sc(100), by, sc(100), sc(26), 1);
+}
+
+unsafe fn pick_color(win: HWND, i: usize) {
+    let opts = opt_with(|o| o.opts);
+    let cur = opt_current()[opts.params[i].key] as u32;
+    let mut custom = [0xFFFFFFu32; 16];
+    let mut cc: CHOOSECOLORW = std::mem::zeroed();
+    cc.lStructSize = std::mem::size_of::<CHOOSECOLORW>() as u32;
+    cc.hwndOwner = win;
+    cc.rgbResult = to_colorref(cur);
+    cc.lpCustColors = custom.as_mut_ptr();
+    cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+    if ChooseColorW(&mut cc) != 0 {
+        opt_set_param(i, to_colorref(cc.rgbResult) as f64);
+        InvalidateRect(opt_item(ID_O_PARAM + i as i32), null(), 1);
+    }
+}
+
+unsafe fn opt_message(win: HWND, text: &str) {
+    MessageBoxW(win, wide(text).as_ptr(), wide("Weather Clock").as_ptr(), MB_ICONINFORMATION);
+}
+
+unsafe extern "system" fn opt_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_CREATE => {
+            OPTWIN.with(|c| c.set(hwnd as isize)); // the controls built next look the window up
+            opt_build(hwnd);
+            opt_layout(hwnd);
+            return 0;
+        }
+        WM_SIZE => {
+            if wp != SIZE_MINIMIZED as usize && OPT.with(|o| o.borrow().is_some()) {
+                opt_layout(hwnd);
+            }
+            return 0;
+        }
+        WM_CTLCOLORSTATIC if GetDlgCtrlID(lp as HWND) >= ID_O_PARAM && OPT.with(|o| o.borrow().is_some()) => {
+            let id = GetDlgCtrlID(lp as HWND);
+            let opts = opt_with(|o| o.opts);
+            let i = (id - ID_O_PARAM) as usize;
+            if i < opts.params.len() && matches!(opts.params[i].kind, Kind::Color) {
+                let rgb = opt_current()[opts.params[i].key] as u32;
+                return opt_with(|o| {
+                    if let Some(b) = o.brushes.iter().find(|b| b.0 == rgb) {
+                        return b.1 as LRESULT;
+                    }
+                    let b = CreateSolidBrush(to_colorref(rgb));
+                    o.brushes.push((rgb, b));
+                    b as LRESULT
+                });
+            }
+        }
+        WM_HSCROLL_ => {
+            let id = GetDlgCtrlID(lp as HWND);
+            let opts = opt_with(|o| o.opts);
+            if id >= ID_O_PARAM && ((id - ID_O_PARAM) as usize) < opts.params.len() {
+                let i = (id - ID_O_PARAM) as usize;
+                let pos = SendMessageW(lp as HWND, TBM_GETPOS_, 0, 0) as f64;
+                let v = match opts.params[i].kind {
+                    Kind::Float(lo, hi) => lo + pos / TRACK_STEPS * (hi - lo),
+                    _ => pos,
+                };
+                opt_set_param(i, v);
+            }
+            return 0;
+        }
+        WM_COMMAND => {
+            let (id, code) = ((wp & 0xFFFF) as i32, ((wp >> 16) & 0xFFFF) as u32);
+            let opts = opt_with(|o| o.opts);
+            match id {
+                ID_O_PRESET if code == 1 /* CBN_SELCHANGE */ => {
+                    let i = SendMessageW(GetDlgItem(hwnd, ID_O_PRESET), CB_GETCURSEL_, 0, 0);
+                    let vals = if i >= 0 { opt_with(|o| o.presets.get(i as usize).map(|p| p.1.clone())) } else { None };
+                    if let Some(vals) = vals {
+                        opt_store(vals.clone());
+                        opt_load_controls(&vals);
+                        opt_show_preset();
+                    }
+                }
+                ID_O_SAVE => {
+                    let name = get_text(GetDlgItem(hwnd, ID_O_PRESET)).trim().to_string();
+                    if name.is_empty() || name == "Custom" {
+                        opt_message(hwnd, "Type a name for the preset in the Preset box first, then click Save.");
+                    } else if opt_with(|o| o.presets.iter().any(|p| p.2 && p.0.eq_ignore_ascii_case(&name))) {
+                        opt_message(hwnd, "That name belongs to a built-in preset. Pick another name.");
+                    } else {
+                        let (vals, bg) = (opt_current(), opt_with(|o| o.bg));
+                        cfg_with(|c| {
+                            c.bg_presets.entry(crate::bg::index_to_id(bg).to_string()).or_default().insert(name.clone(), vals);
+                        });
+                        let list = cfg_with(|c| preset_list(opts, c, bg));
+                        opt_with(|o| o.presets = list);
+                        opt_fill_presets();
+                        // show the new name even when its values equal a built-in preset's
+                        if let Some(i) = opt_with(|o| o.presets.iter().position(|p| !p.2 && p.0 == name)) {
+                            SendMessageW(GetDlgItem(hwnd, ID_O_PRESET), CB_SETCURSEL_, i, 0);
+                            EnableWindow(GetDlgItem(hwnd, ID_O_DELETE), 1);
+                        }
+                    }
+                }
+                ID_O_DELETE => {
+                    let i = SendMessageW(GetDlgItem(hwnd, ID_O_PRESET), CB_GETCURSEL_, 0, 0);
+                    let target = if i >= 0 { opt_with(|o| o.presets.get(i as usize).filter(|p| !p.2).map(|p| p.0.clone())) } else { None };
+                    if let Some(name) = target {
+                        if MessageBoxW(hwnd, wide(&format!("Delete the preset \"{name}\"?")).as_ptr(), wide("Weather Clock").as_ptr(), MB_YESNO | MB_ICONQUESTION) == IDYES {
+                            let bg = opt_with(|o| o.bg);
+                            cfg_with(|c| {
+                                if let Some(m) = c.bg_presets.get_mut(crate::bg::index_to_id(bg)) {
+                                    m.remove(&name);
+                                }
+                            });
+                            let list = cfg_with(|c| preset_list(opts, c, bg));
+                            opt_with(|o| o.presets = list);
+                            opt_fill_presets();
+                        }
+                    }
+                }
+                IDOK => {
+                    DestroyWindow(hwnd);
+                }
+                IDCANCEL => {
+                    let (bg, (vals, saved)) = opt_with(|o| (o.bg, o.snapshot.clone()));
+                    let key = crate::bg::index_to_id(bg).to_string();
+                    cfg_with(|c| {
+                        match vals {
+                            Some(v) => c.bg_opts.insert(key.clone(), v),
+                            None => c.bg_opts.remove(&key),
+                        };
+                        match saved {
+                            Some(s) => c.bg_presets.insert(key, s),
+                            None => c.bg_presets.remove(&key),
+                        };
+                    });
+                    DestroyWindow(hwnd);
+                }
+                _ if id >= ID_O_PARAM && ((id - ID_O_PARAM) as usize) < opts.params.len() => {
+                    let i = (id - ID_O_PARAM) as usize;
+                    match opts.params[i].kind {
+                        Kind::Bool => {
+                            let on = SendMessageW(opt_item(id), BM_GETCHECK_, 0, 0) == 1;
+                            opt_set_param(i, on as i32 as f64);
+                        }
+                        Kind::Choice(_) if code == 1 => {
+                            let v = SendMessageW(opt_item(id), CB_GETCURSEL_, 0, 0).max(0);
+                            opt_set_param(i, v as f64);
+                        }
+                        Kind::Color if code == 0 /* STN_CLICKED */ => pick_color(hwnd, i),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            return 0;
+        }
+        WM_CLOSE => {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        WM_DESTROY => {
+            OPTWIN.with(|c| c.set(0));
+            OPTPANEL.with(|c| c.set(0));
+            if let Some(o) = OPT.with(|o| o.borrow_mut().take()) {
+                for (_, b) in o.brushes {
+                    DeleteObject(b as _);
+                }
+                DeleteObject(o.bold as _);
+            }
+            return 0;
+        }
+        _ => {}
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+/// Close the options window, keeping whatever was set (used when the background changes under it).
+unsafe fn close_options() {
+    let w = OPTWIN.with(|c| c.get()) as HWND;
+    if !w.is_null() {
+        DestroyWindow(w);
+    }
+}
+
+unsafe fn open_options(owner: HWND) {
+    let existing = OPTWIN.with(|c| c.get()) as HWND;
+    if !existing.is_null() {
+        SetForegroundWindow(existing);
+        return;
+    }
+    let bg = sel(owner, ID_BG); // the background as chosen in the dialog right now, not as last saved
+    let Some(opts) = options::for_bg(bg) else { return };
+    let (dpi, _) = ST.with(|s| {
+        let s = s.borrow();
+        let s = s.as_ref().unwrap();
+        (s.dpi, s.font)
+    });
+    let sc = |v: i32| v * dpi / 96;
+    let hinst = GetModuleHandleW(null());
+    let class = wide("WxScrOptions");
+    let mut wc: WNDCLASSW = std::mem::zeroed();
+    wc.lpfnWndProc = Some(opt_proc);
+    wc.hInstance = hinst;
+    wc.lpszClassName = class.as_ptr();
+    wc.hbrBackground = (COLOR_BTNFACE + 1) as isize as HBRUSH;
+    wc.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
+    wc.hIcon = LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR) as _;
+    RegisterClassW(&wc); // returns 0 if already registered, which is fine
+
+    let key = crate::bg::index_to_id(bg);
+    let state = cfg_with(|c| OptState {
+        bg,
+        opts,
+        presets: preset_list(opts, c, bg),
+        snapshot: (c.bg_opts.get(key).cloned(), c.bg_presets.get(key).cloned()),
+        brushes: Vec::new(),
+        bold: CreateFontW(-(9 * dpi / 72), 0, 0, 0, FW_BOLD as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Segoe UI").as_ptr()),
+        content_h: 0,
+    });
+    OPT.with(|o| *o.borrow_mut() = Some(state));
+
+    // as tall as the content wants (up to 90% of the screen), at the left so the live preview stays visible
+    let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+    let (scr_w, scr_h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    let content = 20 * 30 + 4 * 32 + 20;
+    let mut r = RECT { left: 0, top: 0, right: sc(OPT_PANEL_W + 20), bottom: sc(OPT_TOP_H + OPT_BOTTOM_H + content) };
+    AdjustWindowRectEx(&mut r, style, 0, 0);
+    let (w, h) = ((r.right - r.left).min(scr_w * 90 / 100), (r.bottom - r.top).min(scr_h * 90 / 100));
+    let title = format!("{} options and presets", opts.title);
+    let win = CreateWindowExW(0, class.as_ptr(), wide(&title).as_ptr(), style | WS_VISIBLE, sc(24), (scr_h - h) / 3, w, h, owner, null_mut(), hinst, null());
+    if win.is_null() {
+        crate::log(&format!("options window could not be created (error {})", windows_sys::Win32::Foundation::GetLastError()));
+        OPT.with(|o| *o.borrow_mut() = None);
+        return;
+    }
+    OPTWIN.with(|c| c.set(win as isize));
 }
 
 pub unsafe fn run(owner: HWND) {

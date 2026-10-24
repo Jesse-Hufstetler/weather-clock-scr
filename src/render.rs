@@ -5,6 +5,8 @@
 
 use crate::bg;
 use crate::config::Config;
+use crate::flurry::{self, Flurry};
+use crate::options;
 use crate::gl::{self, Gl};
 use crate::text::Rasterizer;
 use crate::weather::Weather;
@@ -22,6 +24,13 @@ const GL_RGBA32F: i32 = 0x8814;
 const GL_FLOAT_: u32 = 0x1406;
 const GL_REPEAT: u32 = 0x2901;
 const NOISE_N: usize = 256;
+const GL_LUMINANCE_ALPHA_: u32 = 0x190A;
+const GL_LINEAR_MIPMAP_NEAREST_: i32 = 0x2701;
+const GL_FUNC_ADD_: u32 = 0x8006;
+const GL_FUNC_SUBTRACT_: u32 = 0x800A;
+const GL_TEXTURE_ENV_: u32 = 0x2300;
+const GL_TEXTURE_ENV_MODE_: u32 = 0x2200;
+const GL_MODULATE_: i32 = 0x2100;
 /// Multipass simulations advance at this fixed rate, whatever the display's refresh rate is.
 const SIM_STEP: f64 = 1.0 / 60.0;
 
@@ -172,6 +181,15 @@ struct MultiState {
     last_step: f64,
 }
 
+/// The Flurry background: the particle simulation, its texture, and the buffer size it last drew into (the buffer is
+/// persistent, so it is cleared whenever that changes).
+struct FlurryState {
+    sim: Flurry,
+    tex: u32,
+    last_t: f64,
+    size: (i32, i32),
+}
+
 pub struct Renderer {
     /// True when the driver honoured a swap interval of 1 (so SwapBuffers paces frames to the display).
     pub vsync: bool,
@@ -200,6 +218,7 @@ pub struct Renderer {
     ready: HashMap<String, Prepared>,
     pending: HashSet<String>,
     multi: Option<MultiState>,
+    flurry: Option<FlurryState>,
     sim_fbo: u32,
     trans_prog: u32,
     down_prog: u32,
@@ -413,7 +432,7 @@ impl Renderer {
             w,
             h,
             // multipass backgrounds are built on the first frame (render() sees the index differ)
-            bg: if bg::is_multi(bg_idx) { usize::MAX } else { bg_idx },
+            bg: if bg::is_multi(bg_idx) || bg::is_flurry(bg_idx) { usize::MAX } else { bg_idx },
             bg_prog,
             blit_prog,
             text_prog,
@@ -431,6 +450,7 @@ impl Renderer {
             ready: HashMap::new(),
             pending: HashSet::new(),
             multi: None,
+            flurry: None,
             sim_fbo: 0,
             trans_prog,
             down_prog,
@@ -662,6 +682,12 @@ impl Renderer {
     /// Switch background: single-pass shaders swap one program; multipass ones build their buffers.
     unsafe fn set_background(&mut self, idx: usize, tw: i32, th: i32) {
         self.free_multi();
+        self.free_flurry();
+        if bg::is_flurry(idx) {
+            self.flurry = Some(self.build_flurry());
+            self.bg = idx;
+            return;
+        }
         if let Some(spec) = bg::multi(idx) {
             match self.build_multi(spec, tw, th) {
                 Ok(m) => {
@@ -749,6 +775,86 @@ impl Renderer {
         }
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
         Ok(MultiState { spec, progs, tex, read: vec![0; n], mip, noise, sw, sh, bsize, last_step: f64::NEG_INFINITY })
+    }
+
+    unsafe fn build_flurry(&mut self) -> FlurryState {
+        let mut tex = 0u32;
+        glGenTextures(1, &mut tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA_ as i32, 256, 256, 0, GL_LUMINANCE_ALPHA_, GL_UNSIGNED_BYTE, flurry::texture().as_ptr() as *const _);
+        (self.gl.GenerateMipmap)(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as i32);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE);
+        FlurryState { sim: Flurry::new(), tex, last_t: f64::NAN, size: (0, 0) }
+    }
+
+    unsafe fn free_flurry(&mut self) {
+        if let Some(f) = self.flurry.take() {
+            glDeleteTextures(1, &f.tex);
+        }
+    }
+
+    /// Flurry: fade the persistent buffer a little towards the background colour, then draw this frame's particles on top.
+    unsafe fn render_flurry(&mut self, f: &Frame) {
+        let Some(mut st) = self.flurry.take() else { return };
+        let p = flurry::Params::from_values(&options::values_for(f.cfg, bg::FLURRY));
+        (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, self.fbo);
+        glViewport(0, 0, self.fw, self.fh);
+        (self.gl.UseProgram)(0);
+        (self.gl.ActiveTexture)(gl::TEXTURE0);
+        let b = p.back;
+        if st.size != (self.fw, self.fh) {
+            st.size = (self.fw, self.fh);
+            glClearColor(b[0], b[1], b[2], 1.0);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        let dt = if st.last_t.is_finite() && f.t >= st.last_t { (f.t - st.last_t).min(0.1) } else { 1.0 / 60.0 };
+        st.last_t = f.t;
+        st.sim.step(dt, &p, self.fw as f64, self.fh as f64);
+
+        glEnable(GL_BLEND);
+        glDisable(GL_TEXTURE_2D);
+        (self.gl.BlendEquation)(GL_FUNC_ADD_);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        // the fade is per 1/60 s, so the trails last equally long at any frame rate
+        let a = (1.0 - (1.0 - p.fade).powf(dt * 60.0)) as f32;
+        glColor4f(b[0], b[1], b[2], a);
+        glBegin(GL_QUADS);
+        for (x, y) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            glVertex2f(x, y);
+        }
+        glEnd();
+
+        match p.blend {
+            flurry::BLEND_NORMAL => glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA),
+            flurry::BLEND_SUBTRACT => {
+                (self.gl.BlendEquation)(GL_FUNC_SUBTRACT_);
+                glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
+            }
+            flurry::BLEND_MULTIPLY => glBlendFunc(GL_ZERO, GL_SRC_COLOR),
+            _ => glBlendFunc(GL_SRC_ALPHA, GL_ONE),
+        }
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, st.tex);
+        glTexEnvi(GL_TEXTURE_ENV_, GL_TEXTURE_ENV_MODE_, GL_MODULATE_);
+        let (iw, ih) = (2.0 / self.fw as f32, 2.0 / self.fh as f32);
+        glBegin(GL_QUADS);
+        for q in &st.sim.quads {
+            glColor4f(q.color[0], q.color[1], q.color[2], q.color[3]);
+            for k in 0..4 {
+                glTexCoord2f(q.u[k], q.v[k]);
+                glVertex2f(q.x[k] * iw - 1.0, q.y[k] * ih - 1.0);
+            }
+        }
+        glEnd();
+        glDisable(GL_TEXTURE_2D);
+        (self.gl.BlendEquation)(GL_FUNC_ADD_);
+        glDisable(GL_BLEND);
+        glColor4f(1.0, 1.0, 1.0, 1.0);
+        self.flurry = Some(st);
     }
 
     unsafe fn free_multi(&mut self) {
@@ -871,7 +977,9 @@ impl Renderer {
         glDisable(GL_BLEND);
         // 1. background -> offscreen
         let sim_t = (f.t as f32) * bg::TIME_SCALE[f.bg.min(bg::NAMES.len() - 1)];
-        if bg::is_geometry(f.bg) && self.multi.is_none() {
+        if self.flurry.is_some() {
+            self.render_flurry(f);
+        } else if bg::is_geometry(f.bg) && self.multi.is_none() {
             self.render_geometry(f.bg, sim_t);
         } else if self.multi.is_some() {
             self.render_multi(f.t, sim_t, tw, th);
@@ -1120,7 +1228,7 @@ impl Renderer {
         (self.gl.GenFramebuffers)(1, &mut fbo);
         (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, fbo);
         (self.gl.FramebufferTexture2D)(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-        if bg::is_multi(f.bg) {
+        if bg::is_multi(f.bg) || bg::is_flurry(f.bg) {
             // feedback simulations need history: run ~4 s of steps first
             for k in 0..240 {
                 let warm = Frame { t: f.t - (240 - k) as f64 / 60.0, cfg: f.cfg, wx: f.wx, show_text: false, bg: f.bg, now: f.now, vis: 1.0, tstyle: 0 };

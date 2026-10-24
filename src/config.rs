@@ -1,7 +1,13 @@
 //! Settings stored as JSON in %APPDATA%\wxscr\config.json (no registry, no key material needed).
 
+use crate::options::Values;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+fn values_from(v: &Value) -> Values {
+    v.as_object().map(|o| o.iter().filter_map(|(k, x)| x.as_f64().map(|x| (k.clone(), x))).collect()).unwrap_or_default()
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -40,6 +46,10 @@ pub struct Config {
     pub render_scale: u32,
     /// Fade in / out of the screensaver: index into render::TRANS_NAMES (last = random).
     pub transition: usize,
+    /// Chosen option values per background id (see options.rs); missing keys mean the default.
+    pub bg_opts: BTreeMap<String, Values>,
+    /// Presets the user saved, per background id, then by name.
+    pub bg_presets: BTreeMap<String, BTreeMap<String, Values>>,
 }
 
 impl Default for Config {
@@ -66,6 +76,8 @@ impl Default for Config {
             contrast: 0,
             render_scale: 100,
             transition: 2,
+            bg_opts: BTreeMap::new(),
+            bg_presets: BTreeMap::new(),
         }
     }
 }
@@ -116,6 +128,12 @@ impl Config {
             Value::Number(n) => crate::render::transition_from_legacy(n.as_u64().unwrap_or(2)),
             _ => c.transition,
         };
+        if let Some(o) = v["bg_options"].as_object() {
+            c.bg_opts = o.iter().map(|(id, vals)| (id.clone(), values_from(vals))).collect();
+        }
+        if let Some(o) = v["bg_presets"].as_object() {
+            c.bg_presets = o.iter().map(|(id, named)| (id.clone(), named.as_object().map(|n| n.iter().map(|(name, vals)| (name.clone(), values_from(vals))).collect()).unwrap_or_default())).collect();
+        }
         c
     }
 
@@ -129,6 +147,7 @@ impl Config {
             "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
             "contrast": self.contrast, "render_scale": self.render_scale, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),
+            "bg_options": self.bg_opts, "bg_presets": self.bg_presets,
         });
         let _ = std::fs::write(path(), serde_json::to_string_pretty(&v).unwrap_or_default());
     }

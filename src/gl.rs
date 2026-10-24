@@ -74,6 +74,7 @@ gl_fns! {
     CheckFramebufferStatus(u32) -> u32;
     GenerateMipmap(u32);
     ActiveTexture(u32);
+    BlendEquation(u32);
 }
 
 const VS: &str = "#version 120\nvarying vec2 uv;\nvoid main(){ gl_Position = gl_Vertex; uv = gl_MultiTexCoord0.xy; }\n";

@@ -8,7 +8,7 @@ pub const NAMES: [&str; 14] = [
     "Zippy zaps (SnoopethDuckDuck, Shadertoy)",
     "Perhaps a screensaver (pirandello, Shadertoy)",
     "Hex crystal (ChunderFPV, Shadertoy)",
-    "Mac flurry (ufffd, Shadertoy)",
+    "Flurry (Calum Robinson, WebGL port by Roy Curtis)",
     "Spiral journey (ChunderFPV, Shadertoy)",
     "Screensaver squares (julianlumia, Shadertoy)",
     "Rainbeam (Inityx, Shadertoy)",
@@ -126,11 +126,11 @@ pub const CREDITS: [Credit; 14] = [
         changes: "RT() builds its mat2 component by component (a driver crash workaround); iMouse supplied as constant 0, so it auto-rotates",
     },
     Credit {
-        author: "ufffd (simplex noise by Ian McEwan / Ashima Arts, MIT)",
-        license: SHADERTOY_DEFAULT,
-        source: "shadertoy.com/view/lX2SDt",
-        retrieved: "2026-10-18",
-        changes: "Multipass port: simulation at 360px height, stepped at 60 Hz; buffers A-C share one file; O-=O -> O=vec4(0)",
+        author: "Roy Curtis (Flurry-WebGL), after Flurry by Calum Robinson (github.com/calumr/flurry)",
+        license: "MIT (Flurry-WebGL's licence, granted with Calum Robinson's permission)",
+        source: "github.com/RoyCurtis/Flurry-WebGL",
+        retrieved: "2026-10-24",
+        changes: "Ported from JavaScript/WebGL to Rust/OpenGL; trail fade and gravity made independent of frame rate; particle sizes scale with resolution; the texture-frame index uses the original's & operator; options and presets are edited in this app's own window",
     },
     Credit {
         author: "ChunderFPV",
@@ -302,8 +302,12 @@ fn single(i: usize) -> Option<&'static str> {
 const BUBBLES: &str = include_str!("shaders/bubbles.glsl");
 
 // ───────────── multipass (feedback) backgrounds ─────────────
-/// Index of the one multipass background (Shadertoy-style buffers A-D + Image).
+/// Flurry is not a shader: a CPU particle simulation drawn as geometry (see flurry.rs). It has options and presets.
 pub const FLURRY: usize = 6;
+
+pub fn is_flurry(i: usize) -> bool {
+    i == FLURRY
+}
 
 pub const SPIRAL: usize = 7;
 pub const RAINBEAM: usize = 9;
@@ -311,7 +315,7 @@ pub const ICE: usize = 12;
 pub const SQUARES: usize = 8;
 
 pub fn is_multi(i: usize) -> bool {
-    i == FLURRY || i == SPIRAL || i == RAINBEAM || i == ICE || i == SQUARES
+    i == SPIRAL || i == RAINBEAM || i == ICE || i == SQUARES
 }
 
 /// What an `iChannelN` reads: nothing, or the latest output of a buffer (`mip` = sampled through its mip chain).
@@ -341,7 +345,6 @@ pub struct Multi {
 
 pub fn multi(i: usize) -> Option<Multi> {
     match i {
-        FLURRY => Some(flurry()),
         SPIRAL => Some(spiral()),
         RAINBEAM => Some(rainbeam()),
         ICE => Some(ice()),
@@ -398,33 +401,6 @@ fn spiral() -> Multi {
     };
     let image = Pass { code: include_str!("shaders/spiral_journey/image.glsl").to_string(), inputs: [Src::Buf(0, true), Src::None, Src::None, Src::None, Src::None], size: None };
     Multi { common: include_str!("shaders/spiral_journey/common.glsl"), buffers: vec![a], image, sim_height: 720 }
-}
-
-fn flurry() -> Multi {
-    // buffer 0 is the small noise field (field.glsl); 1..3 are the tails A, B, C; 4 is D
-    let field = Pass {
-        code: include_str!("shaders/mac_flurry/field.glsl").to_string(),
-        inputs: [Src::None; 5],
-        size: Some((64 * 11, 36)), // GW * NPAN by GH, see common.glsl
-    };
-    let tails = |ang: &str, dist: &str, field_buf: usize| Pass {
-        code: format!("#define ANG_PANEL {ang}\n#define DIST_PANEL {dist}\n{}", include_str!("shaders/mac_flurry/tails.glsl")),
-        inputs: [Src::None, Src::None, Src::None, Src::None, Src::Buf(field_buf, false)],
-        size: None,
-    };
-    let mut a = tails("0.", "3.", 0);
-    let mut b = tails("1.", "4.", 0);
-    let mut c = tails("2.", "5.", 0);
-    a.inputs[0] = Src::Buf(1, true); // A reads its own previous frame, mip-filtered
-    b.inputs[0] = Src::Buf(2, false);
-    c.inputs[0] = Src::Buf(3, false);
-    let d = Pass {
-        code: include_str!("shaders/mac_flurry/buffer_d.glsl").to_string(),
-        inputs: [Src::Buf(1, false), Src::Buf(2, false), Src::Buf(3, false), Src::Buf(4, true), Src::Buf(0, false)],
-        size: None,
-    };
-    let image = Pass { code: include_str!("shaders/mac_flurry/image.glsl").to_string(), inputs: [Src::Buf(4, false), Src::None, Src::None, Src::None, Src::None], size: None };
-    Multi { common: include_str!("shaders/mac_flurry/common.glsl"), buffers: vec![field, a, b, c, d], image, sim_height: 360 }
 }
 
 pub fn pass_source(common: &str, code: &str) -> String {

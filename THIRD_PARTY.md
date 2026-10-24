@@ -21,7 +21,6 @@ Shadertoy keep their own licence; the NonCommercial and ShareAlike terms apply t
 | `frozen_flame.glsl` | mrange | https://www.shadertoy.com/view/N3dXRI | **CC0** (public domain), per the comment in the shader; only change: zero-initialised locals |
 | `perhaps_a_screensaver.glsl` | pirandello (fork of "Trailing the Twinkling Tunnelwisp"; original by BeRo & Paul Karlik) | https://www.shadertoy.com/view/Wfy3zh | **CC0 / public domain**, as stated in the shader. Image pass only; the shader's sound pass is not included. Retrieved 2026-10-18 |
 | `hex_crystal.glsl` | ChunderFPV (uses hexagonal tiles by lomateron, https://www.shadertoy.com/view/MlXyDl) | https://www.shadertoy.com/view/ct2SWw | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; unmodified (iMouse supplied as a constant). Retrieved 2026-10-18 |
-| `mac_flurry/` (5 files, incl. `field.glsl`) | ufffd (simplex noise inside by Ian McEwan / Ashima Arts, MIT) | https://www.shadertoy.com/view/lX2SDt | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Multipass: buffers A-C share `tails.glsl`; `O-=O` written `O=vec4(0.)`. For speed, the simplex noise that varies slowly across the screen is evaluated once per frame on a small grid (`field.glsl`, not in the original) and read back by the full-resolution passes, instead of per pixel; the original expressions are unchanged. Retrieved 2026-10-18 |
 | `spiral_journey/` (3 files) | ChunderFPV | https://www.shadertoy.com/view/mssSWr | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Mouse counter overlay (uses code from https://www.shadertoy.com/view/7tV3zK) omitted; the hosted background texture is replaced by generated noise. Retrieved 2026-10-18 |
 | `screensaver_squares.glsl` | julianlumia (after the starfield tutorial by BigWings / The Art of Code, https://www.youtube.com/watch?v=rvDo9LvfoVE) | https://www.shadertoy.com/view/Wdcyz7 | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**; one local variable renamed. Retrieved 2026-10-18 |
 | `rainbeam/` (2 files) | Inityx | https://www.shadertoy.com/view/flffWX | No license stated by the author → Shadertoy default, **CC BY-NC-SA 3.0**. Multipass; hosted noise textures replaced by generated noise; identifiers `blobs` and `saturate` renamed. Retrieved 2026-10-18 |
@@ -47,20 +46,33 @@ and in full under **Credits…**.
 | zippopotam.us | resolves zip codes you type |
 
 
-## Simplex noise inside `mac_flurry/common.glsl`
+## Flurry (`src/flurry.rs`)
 
-Copyright (C) 2011 Ashima Arts. All rights reserved. Ian McEwan, Ashima Arts; maintained by stegu
-(https://github.com/ashima/webgl-noise, https://github.com/stegu/webgl-noise). Distributed under the MIT License:
+A Rust/OpenGL port of **Flurry-WebGL** by Roy Curtis (https://github.com/RoyCurtis/Flurry-WebGL), which is itself derived from **Flurry** by
+Calum Robinson (https://github.com/calumr/flurry). The simulation, the particle texture generator and the ten built-in presets follow
+Flurry-WebGL; changes are listed in `src/bg.rs` and in the file header. Flurry-WebGL's license, which says it is granted with Calum
+Robinson's permission:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the Software without restriction, including without limitation the
-rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
-persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the
-Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
-WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+> **This license applies to the HTML/CSS/JS code that makes up Flurry-WebGL; however large parts of its codebase is derived/copied from the original code base by Calum Robinson. With his permission, I have licensed this work under MIT.**
+> 
+> The MIT License (MIT)
+> 
+> Copyright (c) 2014 Roy Adrian Curtis
+> 
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+> 
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+> 
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

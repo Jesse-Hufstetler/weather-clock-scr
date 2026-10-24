@@ -9,7 +9,7 @@ Chromium-web-page screensaver + `dash2.html` setup.
   high/low, rain chance, wind and next sunrise/sunset. All text is fully opaque.
 - **Readable on anything**: pick how the text is kept legible over busy backgrounds: a soft shadow, a black halo that blurs out to nothing, or a thick black outline.
 - **Transitions**: the screensaver fades in over whatever was on screen when it starts and fades back out to the live desktop when you touch something (the window's own transparency is animated, so the real desktop shows through). Choose fade, blur fade (the scene focuses in), zoom, none or random; picking one in settings replays it in the preview, and the *Fullscreen-size test* uses it too.
-- **Backgrounds**: your own *SKEENSAVUH* bubbles shader (the default) plus thirteen other Shadertoy shaders (Random gallery, Frozen flame cavern, Zippy zaps, Perhaps a screensaver, Hex crystal, Mac flurry, Spiral journey, Screensaver squares, Rainbeam, Zooming bokeh, Ultra liquid bokeh, Ice and fire, Wavy background), or random. Multipass shaders with feedback buffers (Mac flurry, Spiral journey, Rainbeam) are supported by a small Shadertoy-style engine. Author, license, source, retrieval date and changes show in settings under the preview, with a full list under **Credits…**.
+- **Backgrounds**: your own *SKEENSAVUH* bubbles shader (the default) plus twelve other Shadertoy shaders (Random gallery, Frozen flame cavern, Zippy zaps, Perhaps a screensaver, Hex crystal, Spiral journey, Screensaver squares, Rainbeam, Zooming bokeh, Ultra liquid bokeh, Ice and fire, Wavy background), a native port of Flurry (Roy Curtis' Flurry-WebGL, after Calum Robinson's Flurry), or random. Multipass shaders with feedback buffers (Spiral journey, Rainbeam) are supported by a small Shadertoy-style engine. Author, license, source, retrieval date and changes show in settings under the preview, with a full list under **Credits…**.
 - **Smooth and light**: native resolution at your display's refresh rate (paced by vsync, so it idles the CPU: a few percent of one core here). Optional fps cap and a brightness slider for OLED; the text breathes and drifts slowly against burn-in.
 - Works across multiple monitors, per-monitor DPI aware, cached weather so numbers show instantly on start.
 
@@ -36,6 +36,18 @@ Right-click `Weather Clock.scr` → **Install**, then pick it in Screen Saver Se
 
 Settings live in `%APPDATA%\wxscr\config.json`; the weather cache and a small `log.txt` are next to it.
 
+## Background options and presets
+
+A background can have its own options. When the chosen one does, **Background options and presets…** under the Background box opens a
+window with its sliders, choices and colours, plus a **Preset** box. Every change shows in the live preview straight away; **OK** keeps it,
+**Cancel** puts everything back. To save your own preset, type a name in the Preset box and click **Save**; **Delete** removes one of yours
+(the built-in presets stay). Values are stored per background under `bg_options` and `bg_presets` in `config.json`.
+
+Flurry is the first background with options (its ten Flurry-WebGL presets are built in: Default, Nevada, Birds, Skittle Spray, Treasure,
+Bokeh, Heaven Or Las Vegas, Garlands, Passionfruit, Spider). To give another background options, declare an `Options` (parameters with a
+key, label, group, range and default, plus presets) as data, return it from `options::for_bg`, and read the values with
+`options::values_for` where it renders. The window builds itself from that declaration.
+
 ## Performance
 
 Several backgrounds were restructured so the GPU does not repeat work that is the same for every pixel (the pictures are unchanged; see
@@ -43,7 +55,6 @@ Several backgrounds were restructured so the GPU does not repeat work that is th
 
 | background | before | after |
 |---|---|---|
-| Mac flurry | 49 | 10 |
 | Ultra liquid bokeh | 117 | 15 |
 | Ice and fire | 41 | 12.5 |
 | Screensaver squares | 28 | 9.5 |
