@@ -55,6 +55,7 @@ const ID_SCALE: i32 = 125;
 const ID_BGOPT: i32 = 126;
 const ID_SPEED: i32 = 127;
 const ID_SPEED_V: i32 = 128;
+const ID_INVERT: i32 = 129;
 /// Posted by the detection thread when `DETECT_RESULT` is ready.
 const WM_DETECTED: u32 = WM_APP + 1;
 
@@ -191,6 +192,8 @@ unsafe fn build(panel: HWND) {
     chk("Show seconds", ID_SECS, cfg.seconds, y);
     y += 22;
     chk("Show high/low, rain, wind and sunset line", ID_DETAILS, cfg.details, y);
+    y += 22;
+    chk("Invert colors from sunrise to sunset", ID_INVERT, cfg.invert_day, y);
     y += 32;
 
     let combo = |id: i32, opts: &[&str], cur: usize, y: i32, style: u32| {
@@ -435,6 +438,7 @@ unsafe fn collect(dlg: HWND, resolve: bool) -> Option<Config> {
     cfg.clock24 = checked(dlg, ID_H24);
     cfg.seconds = checked(dlg, ID_SECS);
     cfg.details = checked(dlg, ID_DETAILS);
+    cfg.invert_day = checked(dlg, ID_INVERT);
     cfg.background = sel(dlg, ID_BG);
     cfg.fps = FPS_OPTS[sel(dlg, ID_FPS).min(2)];
     cfg.render_scale = SCALE_OPTS[sel(dlg, ID_SCALE).min(2)];

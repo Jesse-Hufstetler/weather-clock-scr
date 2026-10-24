@@ -26,6 +26,8 @@ pub struct Config {
     pub clock24: bool,
     pub seconds: bool,
     pub details: bool,
+    /// Invert the background (and flip the text to dark) between sunrise and sunset.
+    pub invert_day: bool,
     /// Index into bg::BACKGROUNDS, or bg::RANDOM.
     pub background: usize,
     /// Frame-rate cap; 0 = no cap (render at the display's refresh rate, paced by vsync).
@@ -68,6 +70,7 @@ impl Default for Config {
             clock24: false,
             seconds: true,
             details: true,
+            invert_day: false,
             background: 0,
             fps: 0,
             brightness: 100,
@@ -115,6 +118,7 @@ impl Config {
         c.clock24 = bo("clock24", c.clock24);
         c.seconds = bo("seconds", c.seconds);
         c.details = bo("details", c.details);
+        c.invert_day = bo("invert_day", c.invert_day);
         // stored as a stable string id ("bubbles", "zippy_zaps", "random", ...); older numeric values fall back to the default
         c.background = v["background"].as_str().map(crate::bg::id_to_index).unwrap_or(0);
         // new key name on purpose: older configs saved a 30 fps cap that should no longer apply
@@ -147,7 +151,7 @@ impl Config {
             "auto_location": self.auto_location, "location": self.location, "detected_text": self.detected_text, "lat": num(self.lat), "lon": num(self.lon),
             "place": self.place, "resolved_for": self.resolved_for,
             "fahrenheit": self.fahrenheit, "clock24": self.clock24, "seconds": self.seconds,
-            "details": self.details, "background": crate::bg::index_to_id(self.background),
+            "details": self.details, "invert_day": self.invert_day, "background": crate::bg::index_to_id(self.background),
             "fps_cap": self.fps, "brightness": self.brightness, "movement": self.movement, "speed": self.speed,
             "monitors": self.monitors, "refresh_min": self.refresh_min, "font": self.font,
             "contrast": self.contrast, "render_scale": self.render_scale, "transition": crate::render::TRANS_IDS.get(self.transition).copied().unwrap_or("blur"),

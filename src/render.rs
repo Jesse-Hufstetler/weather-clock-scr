@@ -149,6 +149,8 @@ struct Locs {
     blit_src: i32,
     blit_bright: i32,
     blit_t: i32,
+    blit_inv: i32,
+    text_inv: i32,
     text_tex: i32,
     text_alpha: i32,
     text_shoff: i32,
@@ -252,9 +254,10 @@ pub struct Renderer {
 }
 
 const BLIT_FS: &str = "#version 120
-uniform sampler2D src; uniform float bright; uniform float t; varying vec2 uv;
+uniform sampler2D src; uniform float bright; uniform float t; uniform float inv; varying vec2 uv;
 void main(){
-  vec3 c = texture2D(src, uv).rgb * bright;
+  vec3 c = texture2D(src, uv).rgb;
+  c = mix(c, vec3(1.0) - c, inv) * bright;
   float n = fract(sin(dot(gl_FragCoord.xy + vec2(fract(t)*91.0, fract(t*1.7)*57.0), vec2(12.9898, 78.233))) * 43758.5453);
   float m = fract(sin(dot(gl_FragCoord.yx + vec2(fract(t*0.3)*37.0, 11.0), vec2(39.3468, 11.135))) * 24634.6345);
   c += (n + m - 1.0) / 255.0;
@@ -264,7 +267,7 @@ void main(){
 /// `mode` 0: soft drop shadow. 1: black halo, like stacking blurred black copies behind the text so it goes from
 /// fully opaque next to the glyphs to fully transparent. 2: thick black outline (distance-based dilation of the glyphs).
 const TEXT_FS: &str = "#version 120
-uniform sampler2D tex; uniform sampler2D sh; uniform float alpha; uniform vec2 shoff; uniform int mode; uniform int pass; varying vec2 uv;
+uniform sampler2D tex; uniform sampler2D sh; uniform float alpha; uniform vec2 shoff; uniform int mode; uniform int pass; uniform float inv; varying vec2 uv;
 void main(){
   float m = texture2D(tex, uv).r;
   float s;
@@ -278,8 +281,8 @@ void main(){
   }
   // pass 0 paints every run's black backdrop (shadow / halo / outline), pass 1 then paints the glyphs over all of it,
   // so one run's outline never cuts into a neighbouring run's letters
-  if (pass == 0) gl_FragColor = vec4(0.0, 0.0, 0.0, s) * alpha;
-  else gl_FragColor = vec4(vec3(m), m) * alpha;
+  if (pass == 0) gl_FragColor = vec4(vec3(inv) * s, s) * alpha;
+  else gl_FragColor = vec4(vec3(1.0 - inv) * m, m) * alpha;
 }";
 
 /// Box-downsample by 4 in one pass: four bilinear taps at +-1 source texel, each averaging a 2x2 block.
@@ -397,6 +400,8 @@ impl Renderer {
             blit_src: gl::uloc(&g, blit_prog, "src"),
             blit_bright: gl::uloc(&g, blit_prog, "bright"),
             blit_t: gl::uloc(&g, blit_prog, "t"),
+            blit_inv: gl::uloc(&g, blit_prog, "inv"),
+            text_inv: gl::uloc(&g, text_prog, "inv"),
             text_tex: gl::uloc(&g, text_prog, "tex"),
             text_alpha: gl::uloc(&g, text_prog, "alpha"),
             text_shoff: gl::uloc(&g, text_prog, "shoff"),
@@ -1039,10 +1044,12 @@ impl Renderer {
         (self.gl.Uniform1i)(self.loc.blit_src, 0);
         (self.gl.Uniform1f)(self.loc.blit_bright, f.cfg.brightness as f32 / 100.0);
         (self.gl.Uniform1f)(self.loc.blit_t, f.t as f32);
+        let inv = if f.cfg.invert_day { f.wx.map_or(0.0, |w| day_factor(w, crate::weather::now_unix())) } else { 0.0 };
+        (self.gl.Uniform1f)(self.loc.blit_inv, inv);
         Self::quad(-1.0, -1.0, 1.0, 1.0, false);
         // 3. text
         if f.show_text {
-            self.draw_text(f, tw, th);
+            self.draw_text(f, tw, th, inv);
         }
         // 4. transition: the finished frame goes through the transition shader to the real target
         if trans {
@@ -1091,7 +1098,7 @@ impl Renderer {
         }
     }
 
-    unsafe fn draw_text(&mut self, f: &Frame, tw: i32, th: i32) {
+    unsafe fn draw_text(&mut self, f: &Frame, tw: i32, th: i32, inv: f32) {
         let hh = th as f32;
         let (em1, emc, em2, em3, em4) = ((0.19 * hh) as i32, (0.034 * hh) as i32, (0.085 * hh) as i32, (0.25 * hh) as i32, (0.036 * hh) as i32);
         let pad = (0.035 * hh).ceil() as i32;
@@ -1184,6 +1191,7 @@ impl Renderer {
         (self.gl.Uniform1i)(self.loc.text_sh, 1);
         (self.gl.Uniform1i)(self.loc.text_mode, style as i32);
         (self.gl.Uniform1f)(self.loc.text_alpha, 1.0);
+        (self.gl.Uniform1f)(self.loc.text_inv, inv);
         let sh_px = 0.009 * hh;
         for pass in 0..2 {
         (self.gl.Uniform1i)(self.loc.text_pass, pass);
@@ -1295,6 +1303,15 @@ fn details_line(w: &Weather, cfg: &Config) -> String {
         parts.push(format!("{label} {clock}"));
     }
     parts.join("   \u{b7}   ")
+}
+
+/// 1 in daylight, 0 at night, easing over one second around the nearest sunrise or sunset; 0 when the times are unknown.
+fn day_factor(w: &Weather, now: i64) -> f32 {
+    let ev = w.sunrise.iter().map(|&x| (x, true)).chain(w.sunset.iter().map(|&x| (x, false)));
+    let Some((t, rising)) = ev.min_by_key(|e| (e.0 - now).abs()) else { return 0.0 };
+    let x = ((now - t) as f32 + 0.5).clamp(0.0, 1.0);
+    let x = x * x * (3.0 - 2.0 * x);
+    if rising { x } else { 1.0 - x }
 }
 
 /// Outline alpha for a glyph mask: 1 inside `radius` pixels of any glyph pixel (distance measured with an exact

@@ -577,7 +577,10 @@ unsafe fn snap(prefix: &str, w: i32, h: i32, only: Option<usize>) {
     let title = wide("snap");
     let hwnd = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_POPUP, 0, 0, 64, 64, null_mut(), null_mut(), hinst, null());
     let mut cfg = Config::load();
-    // dev overrides: WXSCR_CONTRAST=0..2, WXSCR_TRANS=<style>:<visibility>
+    // dev overrides: WXSCR_CONTRAST=0..2, WXSCR_INVERT=1, WXSCR_TRANS=<style>:<visibility>
+    if std::env::var("WXSCR_INVERT").is_ok() {
+        cfg.invert_day = true;
+    }
     if let Some(c) = std::env::var("WXSCR_CONTRAST").ok().and_then(|v| v.parse().ok()) {
         cfg.contrast = c;
     }
