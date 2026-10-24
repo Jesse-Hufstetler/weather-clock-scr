@@ -12,10 +12,10 @@ $Keep    = Join-Path $env:ProgramFiles 'Weather Clock'   # holds the uninstaller
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
          ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
-    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
+    $argList = @('-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
     if ($Uninstall) { $argList += '-Uninstall' }
     if ($Quiet)     { $argList += '-Quiet' }
-    $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -Wait -PassThru
+    $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList $argList -Wait -PassThru
     exit $p.ExitCode
 }
 
@@ -137,7 +137,7 @@ Set-ItemProperty $desk 'SCRNSAVE.EXE' $Target
 Set-ItemProperty $desk 'ScreenSaveActive' '1'
 if (-not (Get-ItemProperty $desk).ScreenSaveTimeOut) { Set-ItemProperty $desk 'ScreenSaveTimeOut' '300' }
 
-Done "$Name $ver is installed and set as your screensaver.`nThe settings window opens next; you can change them later in Screen Saver Settings."
-# straight to the settings (location, background, options) so a fresh install can be set up right away
-if (-not $Quiet) { Start-Process -FilePath $Target -ArgumentList '/c' }
+# no "installed" pop-up: Windows' own Screen Saver Settings (the Screen saver tab of the old Display control panel) opens
+# with the new screensaver selected and previewing, which says it already
+if (-not $Quiet) { Start-Process -FilePath "$env:windir\System32\rundll32.exe" -ArgumentList 'shell32.dll,Control_RunDLL desk.cpl,,1' }
 exit 0
